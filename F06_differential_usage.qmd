@@ -1,0 +1,181 @@
+---
+title: "Differential usage analysis"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+---
+title: "Applications"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+suppressPackageStartupMessages(library(Biostrings))
+library(cubar)
+library(tidyverse)
+library(patchwork)
+
+yeast_cds_qc <- check_cds(yeast_cds)
+yeast_cds_qc
+
+yeast_half_life <- as_tibble(yeast_half_life)
+yeast_half_life
+
+# merge expression levels and half lives 
+yeast_exp2 <- yeast_exp |> 
+    full_join(yeast_half_life[c('gene_id', 'half_life')], by = join_by(gene_id)) |> 
+    filter(gene_id %in% names(yeast_cds_qc), fpkm >= 1) |> 
+    mutate(len = width(yeast_cds[gene_id]),
+           len_qc = width(yeast_cds_qc[gene_id]))
+
+yeast_cds_qc <- yeast_cds_qc[names(yeast_cds_qc) %in% yeast_exp2$gene_id]
+yeast_cds_qc <- yeast_cds_qc[yeast_exp2$gene_id]
+yeast_cf <- count_codons(yeast_cds_qc)
+```
+
+
+# Differential usage between HEG & LEG
+```{r}
+get_rscu <- function (cf, weight = 1, pseudo_cnt = 1,
+                      codon_table = get_codon_table(), level = 'subfam') {
+    codon_freq <- colSums(cf * weight)
+    codon_table <- codon_table[aa_code != "*"]
+    codon_table[, `:=`(cts, codon_freq[codon])]
+    codon_table[, `:=`(prop = (cts + pseudo_cnt)/sum(cts + pseudo_cnt), 
+        w_cai = (cts + pseudo_cnt)/max(cts + pseudo_cnt)), by = level]
+    codon_table[, `:=`(rscu, prop/mean(prop)), by = level]
+    return(codon_table[])
+}
+
+yeast_heg <- yeast_exp2 |> slice_max(fpkm, n = 500)
+yeast_leg <- yeast_exp2 |> slice_min(fpkm, n = 500)
+
+rscu_heg <- yeast_cf[yeast_heg$gene_id, ] |> get_rscu(level = 'amino_acid') |> as_tibble()
+rscu_leg <- yeast_cf[yeast_leg$gene_id, ] |> get_rscu(level = 'amino_acid') |> as_tibble()
+
+yeast_dua <- yeast_cds_qc[yeast_heg$gene_id] |> 
+    codon_diff(yeast_cds_qc[yeast_leg$gene_id]) |>
+    as_tibble() |> 
+    filter(!amino_acid %in% c('Met', 'Trp', '*'))
+
+plot(yeast_dua$fam_or, yeast_dua$global_or)
+
+yeast_dua <- yeast_dua |>
+    mutate(codon = fct_reorder(codon, global_or))
+
+tmp <- yeast_dua |> 
+    select(aa_code:subfam, ends_with(c('or', 'padj'))) |> 
+    pivot_longer(cols = ends_with(c('or', 'padj')),
+                 names_sep = '_', names_to = c('test', 'name')) |> 
+    pivot_wider(names_from = name, values_from = value) |> 
+    mutate(
+        test = case_when(
+            test == 'global' ~ 'Overall',
+            test == 'fam' ~ 'Family',
+            TRUE ~ 'Subfamily'),
+        test = fct_relevel(test, 'Overall'),
+        plab = if_else(padj < 0.05, 'Sig.', 'N.S.'))
+
+
+ggplot(tmp, aes(x = codon, y = log2(or))) +
+    geom_col(aes(fill = plab), show.legend = FALSE) +
+    facet_grid(cols = vars(amino_acid), rows = vars(test),
+               drop = TRUE, scale = 'free_x', space = 'free_x') +
+    labs(x = NULL, y = 'log2OR') +
+    ggthemes::scale_fill_colorblind() +
+    theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'),
+          axis.text.x = element_text(
+              family = 'Courier', angle = 90, vjust = 0.5, hjust = 1)) +
+    theme(strip.background = element_blank())
+ggsave('figures/yeast_heg_leg_diff_cub.pdf', width = 10, height = 3)
+```
+
+# Dp
+
+```{r}
+# get tRNA weights
+yeast_trna <- est_trna_weight(yeast_trna_gcn)
+yeast_trna_w <- setNames(yeast_trna$w, yeast_trna$codon)
+
+yeast_exp2$dp <- get_dp(yeast_cf[yeast_exp2$gene_id,], yeast_trna_w)
+
+ggplot(yeast_exp2, aes(x = fpkm, y = dp)) +
+    geom_hex() +
+    scale_x_log10() +
+    scale_fill_viridis_c() +
+    labs(x = 'FPKM (log10)', y = 'Dp', fill = 'Genes') +
+    theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'))
+ggsave('figures/yeast_dp_vs_fpkm.pdf', width = 4, height = 3)
+# Spearman correlation
+cor.test(log10(yeast_exp2$fpkm), yeast_exp2$dp, method = "spearman")$p.value # 1.355655e-17
+```
+
+Comparison with random CDSs
+
+```{r}
+# generate random sequences with similar length distributions
+gen_random_cds <- function(){
+    set.seed(2024)
+    lens <- width(yeast_cds_qc)  # sample(width(yeast_cds_qc), 1000)
+    codon_table <- get_codon_table() |> filter(amino_acid != '*')
+    seqs <- sapply(lens, function(len){
+        str_c(sample(codon_table$codon, len, replace = TRUE), collapse = '')
+    })
+    DNAStringSet(seqs)
+}
+
+cds_rand <- gen_random_cds()
+cds_rand_cf <- count_codons(cds_rand)
+
+cds_rand_dp <- get_dp(cds_rand_cf, yeast_trna_w)
+cds_rand_dp <- tibble(gene_id = str_c(names(yeast_cds_qc), '_rand'), dp = cds_rand_dp)
+
+plt <- bind_rows(Random = cds_rand_dp, Yeast = yeast_exp2[c('gene_id', 'dp')], .id = 'grp')
+# plt <- mutate(plt, grp = fct_relevel(grp, 'Yeast'))
+
+ggplot(plt, aes(x = dp, fill = grp, color = grp)) +
+    geom_density(position = 'identity', alpha = 0.6) +
+    labs(x = 'Dp', y = 'Density', fill = NULL, color = NULL) +
+    ggthemes::scale_fill_colorblind() +
+    ggthemes::scale_color_colorblind() +
+    theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'),
+          legend.position = 'inside',
+          legend.justification.inside = c(0.95, 0.95))
+ggsave('figures/yeast_dp_vs_random.pdf', width = 3, height = 3)
+
+ks.test(cds_rand_dp$dp, yeast_exp2$dp)$p.value # 0
+```
+
+# sequence optimization
+
+```{r}
+yeast_opt <- est_optimal_codons(
+    yeast_cf[yeast_exp2$gene_id, ],
+    gene_score = log1p(yeast_exp2$fpkm))
+
+cds_opt <- lapply(cds_rand, \(x) codon_optimize(x, optimal_codons = yeast_opt))
+cds_opt <- as(cds_opt, 'DNAStringSet')
+cds_opt_cf <- count_codons(cds_opt)
+
+cds_opt_tab <- tibble(
+    gene_id = cds_rand_dp$gene_id,
+    tai = get_tai(cds_rand_cf, trna_w = yeast_trna),
+    tai_opt = get_tai(cds_opt_cf, trna_w = yeast_trna))
+
+ggplot(cds_opt_tab, aes(x = tai, y = tai_opt)) +
+    geom_hex() +
+    geom_abline(linetype = 2, color = 'blue') +
+    labs(x = 'tAI before optimizaiton', y = 'tAI after optimization', fill = 'Genes') +
+    scale_fill_viridis_c() +
+    coord_cartesian(xlim = c(0.21, 0.49), ylim = c(0.21, 0.49), expand = FALSE) +
+    theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'))
+ggsave('figures/random_optimize_to_yeast.pdf', width = 4, height = 3)
+```
+

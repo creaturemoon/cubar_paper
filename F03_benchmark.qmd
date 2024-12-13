@@ -1,0 +1,114 @@
+---
+title: "Benchmark"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+suppressPackageStartupMessages(library(Biostrings))
+library(cubar)
+library(tidyverse)
+```
+
+
+### Benchmark efficiency of core functions
+Create mock datasets with different numbers of sequences
+```{r}
+if(FALSE){  # slow, only run once
+    yeast_cds_qc <- check_cds(yeast_cds)
+    set.seed(2024)
+    n_seq <- c(1000, 2000, 5000, 10000, 20000, 50000, 100000,
+               200000, 500000, 1000000, 2000000, 5000000, 10000000)
+    n_seq <- as.integer(n_seq)
+    
+    for(n in n_seq){
+        writeXStringSet(
+            yeast_cds_qc[sample(length(yeast_cds_qc), size = n, replace = TRUE)], 
+            file = paste0('tmp/yeast_cds_', n, '.fasta.gz'), compress = TRUE)
+    }
+}
+```
+
+Benchmark from terminal (RStudio sometimes stalls for unknown reasons)
+```{bash}
+cd ~/Code/cubar_paper
+nohup Rscript --vanilla src/benchmark.R &
+```
+
+Summarize benchmark results
+```{r}
+mark_read_calc <- readRDS('results/mark_read_calc.20240815.rds')
+mark_from_seq  <- readRDS('results/mark_from_seq.20240815.rds')
+mark_from_cf   <- readRDS('results/mark_from_cf.20240815.rds')
+
+mark_read_calc <- mark_read_calc |> 
+    mutate(fun = attr(expression, 'description')) |> 
+    select(fun, n, min, median, `itr/sec`, mem_alloc, n_itr)
+
+mark_from_seq <- mark_from_seq |> 
+    mutate(fun = attr(expression, 'description')) |> 
+    select(fun, n, min, median, `itr/sec`, mem_alloc, n_itr)
+
+mark_from_cf <- mark_from_cf |> 
+    mutate(fun = attr(expression, 'description')) |> 
+    select(fun, n, min, median, `itr/sec`, mem_alloc, n_itr)
+
+pipelines <- c(
+    "Loading fasta + Tabulate codons + Calculate Index",
+    "Tabulate codons + Calculate Index",
+    "Calculate Index"
+)
+mark <- bind_rows(
+    `Loading fasta + Tabulate codons + Calculate Index` = mark_read_calc,
+    `Tabulate codons + Calculate Index` = mark_from_seq,
+    `Calculate Index` = mark_from_cf,
+    .id = 'grp') |> 
+    mutate(grp = factor(grp, levels = pipelines))
+
+# evaluate time
+ptime <- ggplot(mark, aes(x = n, y = median, color = fun)) +
+    geom_point() +
+    geom_line(aes(group = fun)) +
+    scale_x_continuous(transform = 'log10') +
+    cols4all::scale_color_discrete_c4a_cat('carto.safe') +
+    labs(x = 'Number of input sequences',
+         y = 'Median running time (sec)',
+         color = 'Index') +
+    theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'),
+          strip.text = element_text(color = 'black'),
+          strip.background = element_blank())
+
+ptime + facet_wrap(vars(grp), ncol = 1, scales = 'free_y')
+ggsave('figures/benchmark_time_long.pdf', width = 5, height = 6)
+
+ptime + facet_wrap(vars(grp), nrow = 1, scales = 'free_y')
+ggsave('figures/benchmark_time_wide.pdf', width = 12, height = 3)
+
+# memory allocation (Byte)
+pmem <- ggplot(mark, aes(x = n, y = mem_alloc, color = fun)) +
+    geom_point() +
+    geom_line(aes(group = fun)) +
+    scale_y_continuous(
+        transform = 'log10',
+        breaks = c(1, 10, 100, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10),
+        labels = c('1B', '10B', '100B', '1KB', '10KB', '100KB', '1MB', '10MB', '100MB', '1GB', '10GB')) +
+    scale_x_continuous(transform = 'log10') +
+    cols4all::scale_color_discrete_c4a_cat('carto.safe') +
+    labs(x = 'Number of input sequences',
+         y = 'Memory usage',
+         color = 'Index') +
+    theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'),
+          strip.text = element_text(color = 'black'),
+          strip.background = element_blank())
+
+pmem + facet_wrap(vars(grp), ncol = 1, scales = 'free_y')
+ggsave('figures/benchmark_mem_long.pdf', width = 5, height = 6)
+
+pmem + facet_wrap(vars(grp), nrow = 1, scales = 'free_y')
+ggsave('figures/benchmark_mem_wide.pdf', width = 12, height = 3)
+
+```
+

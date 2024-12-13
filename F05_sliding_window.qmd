@@ -1,0 +1,220 @@
+---
+title: "Applications"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+suppressPackageStartupMessages(library(Biostrings))
+library(cubar)
+library(tidyverse)
+
+yeast_cds_qc <- check_cds(yeast_cds)
+yeast_cds_qc
+
+yeast_half_life <- as_tibble(yeast_half_life)
+yeast_half_life
+
+# merge expression levels and half lives 
+yeast_exp2 <- yeast_exp |> 
+    full_join(yeast_half_life[c('gene_id', 'half_life')], by = join_by(gene_id)) |> 
+    filter(gene_id %in% names(yeast_cds_qc), fpkm >= 1) |> 
+    mutate(len = width(yeast_cds[gene_id]),
+           len_qc = width(yeast_cds_qc[gene_id]))
+
+yeast_cds_qc <- yeast_cds_qc[names(yeast_cds_qc) %in% yeast_exp2$gene_id]
+yeast_cds_qc <- yeast_cds_qc[yeast_exp2$gene_id]
+yeast_cf <- count_codons(yeast_cds_qc)
+```
+
+# sliding-window
+```{r}
+# get tRNA weights
+yeast_trna_w <- est_trna_weight(yeast_trna_gcn)
+```
+
+
+## longest genes
+```{r}
+# top 1000 longest genes
+tmp_long <- yeast_exp2 |> slice_max(len, n = 1000)
+
+yeast_long_swa <- lapply(yeast_cds_qc[tmp_long$gene_id], function(x){
+    slide_apply(x, get_tai, step = 3, before = 2, after = 2, trna_w = yeast_trna_w)
+})
+yeast_long_swa <- bind_rows(yeast_long_swa, .id = 'gene_id')
+
+plt <- yeast_long_swa |>
+       filter(end <= 4500, center >= 150)  # exclude the first 50 codons
+ggplot(plt, aes(x = (center + 2) %/% 3, y = index, group = center)) +
+    geom_boxplot()
+
+plt2 <- plt |> 
+    summarise(index = median(index), .by = c(start, center, end))
+
+ggplot(plt2, aes(x = center %/% 3, y = index)) +
+    geom_point() +
+    geom_line() +
+    geom_smooth(se = FALSE) +
+    labs(x = 'Codon distance', y = 'Window tAI') +
+    theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black')) +
+    scale_x_continuous(breaks = c(50, 500, 1000, 1500)) +
+    coord_cartesian(xlim = c(50, 1525), expand = FALSE)
+
+ggsave('figures/sliding_window_longest_genes.pdf', width = 4, height = 3)
+
+yeast_long_swa_stat <- yeast_long_swa |> 
+    summarize(
+        corr = cor(center, index),
+        pval = cor.test(center, index)$p.value,
+        .by = c(gene_id))
+
+tmp <- yeast_cds_qc[['YKL182W']] |> 
+    slide_apply(get_tai, step = 10, before = 10, after = 10, trna_w = yeast_trna_w)
+
+ggplot(tmp, aes(x = center %/% 3, y = index)) +
+    geom_point() +
+    geom_line() +
+    geom_smooth(method = 'lm', se = FALSE) +
+    labs(x = 'Codon position', y = 'Window tAI') +
+    theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black')) +
+    scale_x_continuous(breaks = c(50, 500, 1000, 1500, 2000)) +
+    coord_cartesian(xlim = c(50, max(tmp$center %/% 3)+25), expand = FALSE)
+ggsave('figures/sliding_window_longest_genes_example.pdf', width = 4, height = 3)
+
+cor.test(tmp$center, tmp$index)
+# p-value = 3.759e-12, corr = 0.4624482
+
+# check trend approaching stop codons;
+# not idea since last windows are not aligned
+plt3 <- yeast_long_swa |> 
+    left_join(tmp_long[c('gene_id', 'len_qc')], by = join_by(gene_id)) |> 
+    mutate(across(c(start, center, end), ~ .x - len_qc - 1)) |> 
+    filter(start >= -3000) |> 
+    summarise(index = median(index), .by = c(start, center, end)) |> 
+    as_tibble()
+
+ggplot(plt3, aes(x = center %/% 3, y = index)) +
+    geom_point() +
+    geom_line() +
+    geom_smooth() +
+    labs(x = 'Codon position', y = 'Window tAI') +
+    theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'))
+
+```
+
+
+## Codon ramp
+```{r}
+
+# only keep genes with at least 150 codons
+tmp_c100 <- yeast_exp2 |> filter(len_qc >= 450)
+
+# all genes
+yeast_all_swa <- lapply(yeast_cds_qc[tmp_c100$gene_id], function(x){
+    slide_apply(x, get_tai, step = 3, before = 2, after = 2, trna_w = yeast_trna_w)
+})
+yeast_all_swa <- bind_rows(yeast_all_swa, .id = 'gene_id')
+
+plt <- yeast_all_swa |> filter(end <= 450)
+ggplot(plt, aes(x = (center + 2) %/% 3, y = index, group = center)) +
+    geom_boxplot()
+
+plt2 <- plt |> 
+    summarise(index = median(index), .by = c(start, center, end))
+
+# weak trends of codon ramp at 5'end
+# see also: https://elifesciences.org/articles/89656
+ggplot(plt2, aes(x = center %/% 3, y = index)) +
+    geom_point() +
+    geom_line() +
+    labs(x = 'Codon position', y = 'Window tAI') +
+    theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'))
+ggsave('figures/sliding_window_codom_ramp.pdf', width = 4, height = 3)
+
+yeast_all_swa_stat <- yeast_all_swa |> 
+    filter(center >= 150) |>  # exclude the first 50 codons
+    summarize(
+        corr = cor(center, index),
+        pval = cor.test(center, index)$p.value,
+        .by = c(gene_id)) |> 
+    as_tibble() |> 
+    left_join(yeast_exp2, by = join_by(gene_id))
+
+yeast_all_swa_stat
+
+ggplot(yeast_all_swa_stat, aes(x = corr)) +
+    geom_histogram(fill = 'lightgrey') +
+    geom_vline(xintercept = 0, linetype = 2, color = 'black') +
+    labs(x = 'Window postion-tAI correlation', y = 'Number of genes') +
+    theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'))
+ggsave('figures/sliding_window_trends_exclude_first50.pdf', width = 4, height = 3)
+# Wilcoxon signed-rank test
+wilcox.test(yeast_all_swa_stat$corr, alternative = "greater", mu = 0)$p.value # 1.484992e-72
+
+tmp <- yeast_cds_qc[['YBR084C-A']] |> 
+    slide_apply(get_tai, step = 3, before = 2, after = 2, trna_w = yeast_trna_w)
+
+ggplot(tmp, aes(x = center %/% 3, y = index)) +
+    geom_point() +
+    geom_line() +
+    geom_smooth(method = 'lm', se = FALSE) +
+    labs(x = 'Codon position', y = 'Window tAI') +
+    theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black')) +
+    scale_x_continuous(breaks = c(50, 100, 150)) +
+    coord_cartesian(xlim = c(50, max(tmp$center %/% 3)+5), expand = FALSE)
+ggsave('figures/sliding_trends_example.pdf', width = 4, height = 3)
+
+cor.test(tmp$center, tmp$index)
+# corr = 0.5616469, p-value = 2.04e-06
+```
+
+GO analysis
+```{r}
+library(org.Sc.sgd.db)
+library(clusterProfiler)
+
+sigpos <- yeast_all_swa_stat |> 
+    mutate(padj = p.adjust(pval, method = 'BH')) |> 
+    filter(corr > 0, padj < 0.05)
+
+sigpos_goa <- enrichGO(sigpos$gene_id, org.Sc.sgd.db, keyType = 'ORF', ont = 'ALL', qvalueCutoff = 0.05)
+sigpos_goa <- simplify(sigpos_goa)
+# only 15 significant categories
+
+enrichplot::dotplot(sigpos_goa, showCategory = 20) + theme_bw(base_size = 12)
+ggsave('figures/sliding_trends_GO.pdf', width = 6, height = 6)
+```
+
+
+misc tests
+```{r}
+cor.test(yeast_all_swa_stat$corr, yeast_all_swa_stat$fpkm, method = 'spearman')
+cor.test(yeast_all_swa_stat$corr, yeast_all_swa_stat$len_qc, method = 'spearman')
+
+yeast_all_swa_stat2 <- yeast_all_swa_stat |> 
+    mutate(
+        gfpkm = cut_number(fpkm, n = 3),
+        glen = cut_number(len_qc, n = 3))
+
+ggplot(yeast_all_swa_stat2, aes(y = gfpkm, x = corr)) +
+    ggridges::geom_density_ridges(quantile_lines = TRUE, quantiles = 2)
+
+ggplot(yeast_all_swa_stat2, aes(y = gfpkm, x = corr)) +
+    ggridges::geom_density_ridges(quantile_lines = TRUE, quantiles = 2) +
+    facet_wrap(vars(glen))
+
+ggplot(yeast_all_swa_stat2, aes(y = glen, x = corr)) +
+    ggridges::geom_density_ridges(quantile_lines = TRUE, quantiles = 2) +
+    facet_wrap(vars(gfpkm))
+
+yeast_all_swa_stat
+```
+

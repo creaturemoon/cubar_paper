@@ -1,0 +1,298 @@
+---
+title: "Regression-based framework for codon usage analysis"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+show that Generalized model is more flexible for codon usage analysis
+
+- regression of codon usage ~ gene expression (log1p) + mRNA stability (log?)
+
+```{r}
+library(cubar)
+library(tidyverse)
+```
+
+### Show the principles of optimal codon inference
+Prepare datasets
+```{r}
+yeast_cds_qc <- check_cds(yeast_cds)
+yeast_cds_qc
+
+yeast_half_life <- as_tibble(yeast_half_life)
+yeast_half_life
+
+# merge expression levels and half lives 
+yeast_exp2 <- yeast_exp |> 
+    full_join(yeast_half_life[c('gene_id', 'half_life')], by = join_by(gene_id)) |> 
+    filter(gene_id %in% names(yeast_cds_qc), fpkm >= 1)
+
+yeast_cds_qc <- yeast_cds_qc[names(yeast_cds_qc) %in% yeast_exp2$gene_id]
+yeast_cds_qc <- yeast_cds_qc[yeast_exp2$gene_id]
+yeast_cf <- count_codons(yeast_cds_qc)
+
+# only keep those with half-life estimated and scale for regression
+yeast_exp3 <- yeast_exp2 |> 
+    filter(!is.na(half_life)) |> 
+    mutate(
+        enc = get_enc(yeast_cf[gene_id, ]),
+        fpkm2 = scale(log10(fpkm))[, 1],
+        half_life2 = scale(log2(half_life))[, 1])
+```
+
+
+```{r}
+glm_codon_data <- function(cf, codon_table = get_codon_table(), level = 'subfam',
+                      gene_scores, fdr = 0.001){
+    cf <- cf[gene_scores$gene_id, ]
+    # exclude stop codons
+    codon_table <- codon_table[aa_code != '*']
+    cf <- cf[, colnames(cf) %in% codon_table$codon]
+
+    # codon data
+    lapply(split(codon_table$codon, f = codon_table[[level]]), function(x){
+        cf_grp <- cf[, x, drop = FALSE]
+        
+        total <- rowSums(cf_grp)
+        res <- apply(cf_grp, 2, function(x){
+            dtt <- data.table::copy(gene_scores)
+            dtt$total <- total
+            dtt$x <- x
+            dtt
+        }, simplify = FALSE)
+    })
+}
+
+yeast_codon_data <- glm_codon_data(yeast_cf, gene_scores = yeast_exp3, level = 'amino_acid')
+
+plt <- bind_rows(yeast_codon_data$Gly, .id = 'codon')
+
+plt |> 
+    filter(total >= 10) |> 
+    ggplot(aes(x = fpkm, y = x/total)) +
+        geom_hex() +
+        scale_fill_viridis_c() +
+        scale_x_continuous(transform = 'log10') +
+        facet_wrap(vars(codon), scales = 'free_y', nrow = 1) +
+        theme_bw(base_size = 12) +
+        theme(strip.background = element_blank()) +
+        labs(x = 'FPKM', y = 'Usage among glycine codons')
+ggsave('figures/codon_usage_vs_gene_expression_example.pdf', width = 12, height = 3)
+
+# count of amino acids with synonymous codons in each gene
+plt2 <- yeast_codon_data |> 
+    map(bind_rows, .id = 'codon') |> 
+    bind_rows(.id = 'amino_acid') |> 
+    distinct(gene_id, gene_name, fpkm, amino_acid, total) |> 
+    filter(!amino_acid %in% c('Met', 'Trp'))
+
+ggplot(plt2, aes(x = total, color = amino_acid)) +
+    geom_vline(xintercept = 10, linetype = 2, color = 'grey') +
+    geom_hline(yintercept = 0.5, linetype = 2, color = 'grey') +
+    stat_ecdf() +
+    labs(x = 'Number of amino acids', y = 'Cumulative fractions', color = NULL) +
+    scale_x_continuous(
+        transform = 'log1p',
+        breaks = c(0, 1, 2, 5, 10, 20, 50, 100, 200, 500)) +
+    scale_y_continuous(expand = expansion(mult = 0.01)) +
+    cols4all::scale_color_discrete_c4a_cat('tol.rainbow') +
+    theme_bw(base_size = 12) +
+    guides(color = guide_legend(ncol = 2))
+ggsave('figures/yeast_amino_acid_usage.pdf', width = 5, height = 3)
+```
+
+
+### Compare methods for optimal codon estimation
+Analysis
+```{r}
+est_optimal_corr <- function(
+        cf, codon_table = get_codon_table(), level = "subfam",
+        gene_score = NULL, fdr = 0.001, method_corr = 'pearson'){
+    if (is.null(gene_score)) {
+        enc <- get_enc(cf, codon_table = codon_table)
+        gene_score <- -enc
+    }
+    codon_table <- codon_table[aa_code != "*"]
+    cf <- cf[, colnames(cf) %in% codon_table$codon]
+    binreg <- lapply(split(codon_table$codon, f = codon_table[[level]]), 
+        function(x) {
+            cf_grp <- cf[, x, drop = FALSE]
+            if (ncol(cf_grp) == 1) {
+                data.table::data.table(codon = colnames(cf_grp), 
+                  coef = 0, pvalue = 1, eff_genes = nrow(cf))
+            }
+            else {
+                total <- rowSums(cf_grp)
+                prop_grp <- cf_grp/total
+                prop_grp <- prop_grp[total >= 10, ]
+                score_grp <- gene_score[total >= 10]
+                res <- apply(prop_grp, 2, function(x) {
+                  ct <- cor.test(x, score_grp, method = method_corr)
+                  c(ct$estimate, ct$p.value, n = length(x))
+                })
+                res <- data.table::as.data.table(as.data.frame(t(res)), 
+                  keep.rownames = "codon")
+                data.table::setnames(res, c("codon", "coef", "pvalue", "eff_genes"))
+            }
+        })
+    bingreg <- data.table::rbindlist(binreg, idcol = level)
+    bingreg[, `:=`(qvalue, stats::p.adjust(pvalue, method = "BH"))]
+    bingreg <- codon_table[bingreg, on = c("codon", level)]
+    bingreg[, `:=`(optimal, coef > 0 & qvalue < fdr)]
+    return(bingreg)
+}
+
+opcodons <- bind_rows(
+    enc_pearson = est_optimal_corr(yeast_cf),
+    enc_spearman = est_optimal_corr(yeast_cf, method_corr = 'spearman'),
+    enc_glm = est_optimal_codons(yeast_cf),
+    exp_pearson = est_optimal_corr(yeast_cf, gene_score = log1p(yeast_exp2$fpkm)),
+    exp_spearman = est_optimal_corr(yeast_cf, , gene_score = log1p(yeast_exp2$fpkm), method_corr = 'spearman'),
+    exp_glm = est_optimal_codons(yeast_cf, gene_score = log1p(yeast_exp2$fpkm)),
+    hlf_pearson = est_optimal_corr(yeast_cf[yeast_exp3$gene_id, ], gene_score = yeast_exp3$half_life2),
+    hlf_spearman = est_optimal_corr(yeast_cf[yeast_exp3$gene_id, ], gene_score = yeast_exp3$half_life2, method_corr = 'spearman'),
+    hlf_glm = est_optimal_codons(yeast_cf[yeast_exp3$gene_id, ], gene_score = yeast_exp3$half_life2),
+    .id = 'method')
+
+# Cysteine example: GLM more powerful
+opcodons |> 
+    filter(str_detect(method, 'hlf'), amino_acid == 'Cys')
+
+
+# compare coefficients
+opcodons_coef <- opcodons |> 
+    pivot_wider(id_cols = c(aa_code, codon, amino_acid, subfam),
+                names_from = method, values_from = coef) |> 
+    rowwise() |> 
+    mutate(n_pos = sum(c_across(enc_pearson:exp_glm) > 0),
+           n_neg = sum(c_across(enc_pearson:exp_glm) < 0)) |>
+    ungroup() |> 
+    filter(!amino_acid %in% c('Met', 'Trp'))
+
+opcodons_coef |> 
+    select(enc_pearson:exp_glm) |> 
+    GGally::ggpairs()
+
+ggplot(opcodons_coef, aes(x = exp_pearson, y = exp_glm)) +
+    geom_point() +
+    theme_bw(base_size = 12) +
+    geom_vline(xintercept = 0, linetype = 2, color = 'grey') +
+    geom_hline(yintercept = 0, linetype = 2, color = 'grey') +
+    labs(x = 'Correlation coefficient', y = 'GLM coefficient')
+ggsave('figures/yeast_exp_glm_coef_vs_pearson_corr.pdf', width = 3, height = 3)
+
+opcodons_pval <- opcodons |> 
+    pivot_wider(id_cols = c(aa_code, codon, amino_acid, subfam),
+                names_from = method, values_from = pvalue) |> 
+    filter(!amino_acid %in% c('Met', 'Trp'))
+
+ggplot(opcodons_pval, aes(x = log10(exp_pearson), y = log10(exp_glm))) +
+    geom_point() +
+    theme_bw(base_size = 12) +
+    geom_abline(slope = 1, intercept = 0, linetype = 2, color = 'grey') +
+    labs(x = 'log10(Correlation P value) ', y = 'log10(GLM P value)')
+ggsave('figures/yeast_exp_glm_pval_vs_pearson_corr.pdf', width = 3, height = 3)
+
+## other checks 
+# compare sign
+opcodons_multi <- opcodons |> 
+    mutate(gsize = n(), .by = c(subfam, method)) |> 
+    filter(gsize > 1)
+
+ggplot(opcodons_multi, aes(x = codon, y = method, fill = factor(sign(coef)))) +
+    geom_tile(color = 'black', size = 1) +
+    labs(x = NULL, y = NULL, fill = 'Sign(coef)') +
+    theme_minimal(base_size = 12) +
+    theme(
+        axis.text = element_text(color = 'black'),
+        axis.text.x = element_text(angle = 90))
+
+# compare optimal codons
+opcodons_best <- opcodons |> 
+    filter(coef > 0) |> 
+    group_by(method, subfam) |> 
+    slice_min(qvalue)
+
+opcodons_best_wide <- opcodons_best |> 
+    pivot_wider(id_cols = c(aa_code, amino_acid, subfam),
+                names_from = method, values_from = codon) |> 
+    rowwise() |> 
+    mutate(uniq_n = length(unique(c_across(enc_pearson:exp_glm)))) |>
+    ungroup()
+```
+
+drawback of correlation-based estimation
+- coefs for each family were estimated on a different subset genes
+- much less genes were used to estimate for rare amino acids, and those genes typically have lower codon bias.
+
+### Multivariate analysis
+```{r}
+glm_codon <- function(cf, codon_table = get_codon_table(), level = 'subfam',
+                      gene_scores, fdr = 0.001){
+    cf <- cf[gene_scores$gene_id, ]
+    # exclude stop codons
+    codon_table <- codon_table[aa_code != '*']
+    cf <- cf[, colnames(cf) %in% codon_table$codon]
+
+    # regression analysis for each codon sub-family
+    binreg <- lapply(split(codon_table$codon, f = codon_table[[level]]), function(x){
+        cf_grp <- cf[, x, drop = FALSE]
+        if(ncol(cf_grp) == 1){
+            data.table::data.table(
+                codon = colnames(cf_grp), feature = c('fpkm2', 'half_life2'),
+                coef = 0, se = 0, zvalue = 0, pvalue = 0)
+        }else{
+            total <- rowSums(cf_grp)
+            res <- apply(cf_grp, 2, function(x){
+                dtt <- data.table::copy(gene_scores)
+                dtt$total <- total
+                dtt$x <- x
+                fit <- stats::glm(
+                    cbind(x, total - x) ~ fpkm2 + half_life2,
+                    family = 'binomial', data = dtt)
+                data.table::as.data.table(
+                    summary(fit)$coefficients[-1, ], keep.rownames = 'feature')
+            }, simplify = FALSE)
+            res <- data.table::rbindlist(res, idcol = 'codon')
+            data.table::setnames(res, c('codon', 'feature', 'coef', 'se', 'zvalue', 'pvalue'))
+        }
+    })
+    bingreg <- data.table::rbindlist(binreg, idcol = level)
+    bingreg[, qvalue := stats::p.adjust(pvalue, method = 'BH')]
+    bingreg <- codon_table[bingreg, on = c('codon', level)]
+    bingreg[, c('se', 'zvalue') := NULL]
+    return(bingreg)
+}
+
+ggplot(yeast_exp3, aes(x = fpkm, y = half_life)) +
+    geom_point() +
+    scale_x_log10() +
+    scale_y_log10()
+
+ggplot(yeast_exp3, aes(x = fpkm)) + geom_histogram()
+ggplot(yeast_exp3, aes(x = fpkm)) + geom_histogram() + scale_x_log10()
+ggplot(yeast_exp3, aes(x = half_life)) + geom_histogram()
+ggplot(yeast_exp3, aes(x = half_life)) + geom_histogram() + scale_x_log10()
+
+cor.test(yeast_exp3$fpkm, yeast_exp3$half_life, method = 'spearman')
+# rho = 0.2863122, correlation is moderate
+
+cub_fit <- glm_codon(yeast_cf, gene_scores = yeast_exp3)
+cub_fit <- cub_fit |>
+    filter(!amino_acid %in% c('Met', 'Trp')) |> 
+    mutate(feature = if_else(feature == 'fpkm2', 'FPKM', 'Half life'),
+           label = if_else(qvalue < 0.05, '', 'N.S.'))
+
+ggplot(cub_fit, aes(x = feature, y = codon, fill = coef)) +
+    geom_tile(color = 'grey') +
+    geom_text(aes(label = label), size = 3) +
+    scale_fill_gradient2(high = 'red', low = 'blue') +
+    facet_grid(rows = vars(amino_acid), scales = 'free', space = 'free') +
+    labs(x = NULL, y = NULL, fill = 'GLM coef') +
+    theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'))
+ggsave('figures/cub_glm_fpkm_halflife.pdf', width = 3, height = 12)
+
+```
+

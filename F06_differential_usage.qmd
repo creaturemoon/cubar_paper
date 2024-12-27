@@ -107,7 +107,7 @@ ggplot(yeast_exp2, aes(x = fpkm, y = dp)) +
     geom_hex() +
     scale_x_log10() +
     scale_fill_viridis_c() +
-    labs(x = 'FPKM (log10)', y = 'Dp', fill = 'Genes') +
+    labs(x = 'Gene expression level (RPKM)', y = 'Dp', fill = 'Genes') +
     theme_bw(base_size = 12) +
     theme(axis.text = element_text(color = 'black'))
 ggsave('figures/yeast_dp_vs_fpkm.pdf', width = 4, height = 3)

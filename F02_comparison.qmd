@@ -1,0 +1,409 @@
+---
+title: "Comparison"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+if(!rlang::is_installed('cubar')){
+  devtools::install_github("mt1022/cubar", dependencies = TRUE)
+}
+
+suppressPackageStartupMessages(library(Biostrings))
+library(cubar)
+library(tidyverse)
+library(GGally)
+library(ggbreak)
+```
+
+### Generate sequence files required for calculating indexes
+```{r}
+yeast_cds_qc <- check_cds(yeast_cds)
+Biostrings::writeXStringSet(yeast_cds_qc, 'yeast_cds_qc.fasta')
+heg <- head(yeast_exp[order(-yeast_exp$fpkm), ], n = 500)
+Biostrings::writeXStringSet(yeast_cds[names(yeast_cds) %in% heg$gene_id], 'yeast_heg.fasta')
+```
+
+### CodonW (Version: 1.4.4)
+
+Generate fop.coa required for calculation of Fop in CodonW
+```{bash}
+codonw yeast_cds_qc.fasta -coa_cu -nomenu -silent  -c_type 2 -f_type 4 -nowarn -all_indices
+```
+
+Generate cai.coa required for calculation of CAI in CodonW
+```{r}
+cf_all <- count_codons(yeast_cds)
+heg <- head(yeast_exp[order(-yeast_exp$fpkm), ], n = 500)
+cf_heg <- cf_all[heg$gene_id, ]
+rscu_heg <- est_rscu(cf_heg)
+cai_order <- c('UUU', 'UCU','UAU','UGU','UUC','UCC','UAC','UGC','UUA','UCA','UAA','UGA','UUG','UCG','UAG','UGG','CUU','CCU','CAU','CGU','CUC','CCC','CAC','CGC','CUA','CCA','CAA','CGA','CUG','CCG','CAG','CGG','AUU','ACU','AAU','AGU','AUC','ACC','AAC','AGC','AUA','ACA','AAA','AGA','AUG','ACG','AAG','AGG','GUU','GCU','GAU','GGU','GUC','GCC','GAC','GGC','GUA','GCA','GAA','GGA','GUG','GCG','GAG','GGG')
+cai_order <- gsub('U', 'T', cai_order)
+cai_order <- left_join(data.frame(cai_order), rscu_heg, join_by('cai_order' == 'codon'))
+cai_order$w_cai[is.na(cai_order$w_cai)] <- 1
+write.table(cai_order$w_cai, "cai.coa", col.names = F, row.names = F, quote = F)
+```
+
+Record running time of CodonW
+```{bash}
+# CAI
+for i in {1..5}; do time codonw yeast_cds_qc.fasta "yeast_cai${i}.txt" "yeast_cai${i}.blk" -cai_file cai.coa -c_type 2 -nomenu -cai -nowarn; done
+
+# Fop
+for i in {1..5}; do time codonw yeast_cds_qc.fasta "yeast_fop${i}.txt" "yeast_fop${i}.blk" -fop_file fop.coa -f_type 4 -nomenu -fop -nowarn; done
+
+# ENC
+for i in {1..5}; do time codonw yeast_cds_qc.fasta "yeast_enc${i}.txt" "yeast_enc${i}.blk"  -nomenu -enc -nowarn -silent; done
+
+# GC
+for i in {1..5}; do time codonw yeast_cds_qc.fasta "yeast_gc${i}.txt" "yeast_gc${i}.blk"  -nomenu -gc -nowarn -silent; done
+
+# GC3s
+for i in {1..5}; do time codonw yeast_cds_qc.fasta "yeast_gc3s${i}.txt" "yeast_gc3s${i}.blk"  -nomenu -gc3s -nowarn -silent; done
+
+# RSCU
+for i in {1..5}; do time codonw yeast_cds_qc.fasta "yeast_rscu${i}.txt" "yeast_rscu${i}.blk"  -nomenu -cutot -nowarn -silent; done
+```
+
+### cubar
+
+Record running time of cubar
+```{r}
+# CAI
+cf_all <- count_codons(yeast_cds)
+heg <- head(yeast_exp[order(-yeast_exp$fpkm), ], n = 500)
+cf_heg <- cf_all[heg$gene_id, ]
+rscu_heg <- est_rscu(cf_heg)
+in_fa <- 'yeast_cds_qc.fasta'
+
+for(i in 1:5){
+    print(system.time(
+    cai <- get_cai(count_codons(Biostrings::readDNAStringSet(in_fa)), rscu_heg)
+    ))
+}
+
+# ENC
+for(i in 1:5){
+    print(system.time(
+    enc <- get_enc(count_codons(Biostrings::readDNAStringSet(in_fa)))
+    ))
+}
+
+# RSCU
+for(i in 1:5){
+    print(system.time(
+    rscu <- est_rscu(count_codons(Biostrings::readDNAStringSet(in_fa)))
+    ))
+}
+
+# GC
+for(i in 1:5){
+    print(system.time(
+    gc <- get_gc(count_codons(Biostrings::readDNAStringSet(in_fa)))
+    ))
+}
+
+# GC3s
+for(i in 1:5){
+    print(system.time(
+    gc3s <- get_gc3s(count_codons(Biostrings::readDNAStringSet(in_fa)))
+    ))
+}
+
+# Fop
+# optimal codons from results of CodonW
+op_codonw <- c('UCU','UGU','UUC','UCC','UAC','UUG','CGU','CAC','CCA','CAA','AUU','ACU','AUC','ACC','AAC','AGA','AAG','GUU','GCU','GGU','GUC','GCC','GAC','GAA')
+op_codonw <- gsub('U', 'T', op_codonw) 
+for(i in 1:5){
+    print(system.time(
+    fop <- get_fop(count_codons(Biostrings::readDNAStringSet(in_fa)),  op = op_codonw)
+    ))
+}
+
+# tAI
+for(i in 1:5){
+    print(system.time(
+    tai <- get_tai(count_codons(Biostrings::readDNAStringSet(in_fa)), est_trna_weight(yeast_trna_gcn))
+    ))
+}
+```
+
+### CodonU (Version: 1.1.2)
+
+Record running time of CodonU
+```{python}
+from CodonU import analyzer as an
+from Bio.SeqIO import parse
+import time
+```
+
+```{python}
+# CAI
+# There was an error generated when running these codes.
+ref_fa = 'yeast_heg.fasta'
+sequences = list(parse(ref_fa, "fasta"))
+ref_seqs = [str(seq.seq) for seq in sequences]
+in_fa = 'yeast_cds_qc.fasta'
+
+records = parse(in_fa, "fasta")
+cai_all = {}
+tic = time.time()
+for record in records:
+    seq_q = str(record.seq)
+    cai = an.cai(seq_q, references=ref_seqs, genetic_code=1)
+    cai_all[record.id] = cai
+
+toc = time.time()
+print((toc-tic))
+
+# ENC
+for i in range(5):
+    tic = time.time()
+    enc = an.calculate_enc(in_fa, genetic_code_num = 1, gene_analysis=True)
+    toc = time.time()
+    print((toc-tic))
+    
+# RSCU
+for i in range(5):
+    tic = time.time()
+    rscu = an.calculate_rscu(in_fa, genetic_code_num = 1, min_len_threshold = 0, gene_analysis = False)
+    toc = time.time()
+    print((toc-tic))
+    
+# GC
+for i in range(5):
+    records = parse(in_fa, "fasta")
+    gc_all = {}
+    tic = time.time()
+    for record in records:
+        seq_q = str(record.seq)
+        gc = an.gc_123(seq_q)
+        gc_all[record.id] = gc
+    toc = time.time()
+    print((toc-tic))
+    
+# tAI
+url = 'https://gtrnadb.ucsc.edu/GtRNAdb2/genomes/eukaryota/Scere3/'
+anti_codon_dict = an.get_anticodon_count_dict(url = url, database='GtRNAdb')
+# anti_codon_dict:{'IGC': 11, 'GGC': 0, 'CGC': 0, 'UGC': 5, 'ICC': 0, 'GCC': 16, 'CCC': 2, 'UCC': 3, 'IGG': 2, 'GGG': 0, 'CGG': 0, 'UGG': 10, 'IGU': 11, 'GGU': 0, 'CGU': 1, 'UGU': 4, 'IAC': 14, 'GAC': 0, 'CAC': 2, 'UAC': 2, 'IGA': 11, 'GGA': 0, 'CGA': 1, 'UGA': 3, 'GCU': 4, 'ICG': 6, 'GCG': 0, 'CCG': 1, 'UCG': 0, 'CCU': 1, 'UCU': 11, 'IAG': 0, 'GAG': 1, 'CAG': 0, 'UAG': 3, 'CAA': 10, 'UAA': 7, 'GAA': 10, 'GUU': 10, 'CUU': 14, 'UUU': 7, 'GUC': 16, 'CUC': 2, 'UUC': 14, 'GUG': 7, 'CUG': 1, 'UUG': 9, 'IAU': 13, 'GAU': 0, 'nan': 0, 'UAU': 2, 'CAU': 10, 'GUA': 8, 'UCA': 0, 'CUA': 0, 'UUA': 0, 'GCA': 4, 'CCA': 6}
+
+# run 5 times, and delete the generated best_fit.py file after each run.
+tic = time.time()
+tai_df, abs_wi_df, rel_wi_df = an.calculate_gtai(in_fa, genetic_code_num = 1, anticodon_dict = anti_codon_dict)
+toc = time.time()
+print((toc-tic))
+```
+
+### DAMBE (Verson: 7.3.6)
+
+Manually calculate the running time of the last step (from clicking run to the end of the run)
+
+### Comparison of runtime
+The average running time of each tool and each index (tool_comp.txt):
+Tool	Time	Index
+cubar	0.0346	CAI
+cubar	0.0494	ENC
+cubar	0.0364	RSCU
+cubar	0.0312	GC
+cubar	0.0386	GC3s
+cubar	0.0380	FOP
+cubar	0.0560	tAI
+CodonW	0.3018	CAI
+CodonW	0.3014	ENC
+CodonW	0.2238	RSCU
+CodonW	0.3028	GC
+CodonW	0.2972	GC3s
+CodonW	0.4290	FOP
+DAMBE	1.7840	CAI
+DAMBE	3.1980	ENC
+DAMBE	0.7460	RSCU
+CodonU	2.5756	ENC
+CodonU	2.1783	RSCU
+CodonU	1.8720	GC
+CodonU	15.8972	tAI
+
+```{r}
+library(ggsci)
+df <- read.table('../tool_comp.txt', header = T)
+df$Tool <- factor(df$Tool, levels = unique(df$Tool))
+df1 <- df %>%
+       group_by(Index) %>%
+       mutate(relative_time = Time/first(Time)) %>%
+       filter(Tool != 'cubar')
+
+ggplot(df1,aes(x=factor(Tool,levels =unique(Tool)), 
+               y=relative_time, 
+               fill=factor(Index,levels = unique(Index)), 
+               ))+
+    labs(
+      x="",  
+      y="Runtime relative to cubar",  
+      fill=""
+    ) + 
+    geom_bar(
+        stat="identity",
+        position=position_dodge(0.5),
+        width=0.5
+    ) + 
+    scale_y_log10() +
+    scale_fill_nejm()+
+    theme_bw() +
+    theme(panel.grid=element_blank(),
+       # plot.title = element_text(hjust = 0.5, family = "sans", size = 12),  
+        axis.text.x = element_text(color = "black", size = 10),
+        axis.text.y = element_text(color = "black", size = 10),
+        axis.title.x = element_blank(),
+        legend.text = element_text(size = 7),
+        legend.title = element_text(size = 7), 
+        legend.key.size = unit(0.7, "lines"),
+        legend.position =  'bottom',
+      #  legend.justification = c(0.2, 1.1),
+      #  legend.box.margin = margin(t = 0, r = 0, b = 0, l = 0)
+     ) +
+  guides(fill = guide_legend(nrow = 2))
+
+ggsave('figures/runtime.pdf', width = 3, height = 3)
+```
+
+### Comparison of Index Values
+
+```{r}
+library(ggrastr)
+# CAI
+codonw_cai <- read.table('yeast_cai1.txt', header = T)
+cai_comp <- cbind(codonw_cai, data.frame(cai))
+
+ggplot(cai_comp, aes(x = cai, y = CAI)) +
+     geom_point_rast(pch = 1, size = 0.5, alpha = 0.4) +
+     labs(title = "CAI",
+          x = "cubar", y = "CodonW") +
+     theme_bw() +
+     theme(panel.grid=element_blank(),
+           plot.title = element_text(hjust = 0.5, family = "sans", size = 12),  
+           axis.text = element_text(color = "black", size = 10))
+ggsave('figures/cai_comp.pdf', width = 3, height = 3)
+
+# Fop
+codonw_fop <- read.table('yeast_fop1.txt', header = T)
+fop_comp <- cbind(codonw_fop, data.frame(fop))
+
+ggplot(fop_comp, aes(x = fop, y = Fop)) +
+     geom_point_rast(pch = 1, size = 0.5, alpha = 0.4) +
+     labs(title = "Fop",
+          x = "cubar", y = "CodonW") +
+     theme_bw() +
+     theme(panel.grid=element_blank(),
+           plot.title = element_text(hjust = 0.5, family = "sans", size = 12),
+           axis.text = element_text(color = "black", size = 10)  )
+ggsave('figures/fop_comp.pdf', width = 3, height = 3)
+
+# GC
+codonw_gc <- read.table('yeast_gc1.txt', header = T)
+gc_comp <- cbind(codonw_gc, data.frame(gc))
+
+ggplot(gc_comp, aes(x = gc, y = GC)) +
+     geom_point_rast(pch = 1, size = 0.5, alpha = 0.4) +
+     labs(title = "GC",
+          x = "cubar", y = "CodonW") +
+     theme_bw() +
+     theme(panel.grid=element_blank(),
+           plot.title = element_text(hjust = 0.5, family = "sans", size = 12),
+           axis.text = element_text(color = "black", size = 10)  )
+ggsave('figures/gc_comp.pdf', width = 3, height = 3)
+
+# GC3s
+codonw_gc3s <- read.table('yeast_gc3s1.txt', header = T)
+gc3s_comp <- cbind(codonw_gc3s, data.frame(gc3s))
+
+ggplot(gc3s_comp, aes(x = gc3s, y = GC3s)) +
+     geom_point_rast(pch = 1, size = 0.5, alpha = 0.4) +
+     labs(title = "GC3s",
+          x = "cubar", y = "CodonW") +
+     theme_bw() +
+     theme(panel.grid=element_blank(),
+           plot.title = element_text(hjust = 0.5, family = "sans", size = 12),
+           axis.text = element_text(color = "black", size = 10)  )
+ggsave('figures/gc3s_comp.pdf', width = 3, height = 3)
+
+# RSCU
+cubar_rscu_aa <- est_rscu(count_codons(Biostrings::readDNAStringSet(in_fa)), level = 'amino_acid')
+codonw_rscu <- read.table('codonw_rscu.txt', col.names = c('codon', 'codonw_rscu'))
+codonw_rscu$codon <- gsub('U', 'T', codonw_rscu$codon)
+rscu_comp <- left_join(cubar_rscu_aa[,c('codon', 'rscu')], codonw_rscu, by = 'codon')
+
+ggplot(rscu_comp, aes(x = rscu, y = codonw_rscu)) +
+     geom_point_rast(pch = 1, size = 0.5, alpha = 0.4) +
+     labs(title = "RSCU ",
+          x = "cubar", y = "CodonW") +
+     theme_bw() +
+     theme(panel.grid=element_blank(),
+           plot.title = element_text(hjust = 0.5, family = "sans", size = 12),  
+           axis.text = element_text(color = "black", size = 10))
+ggsave('figures/rscu_comp.pdf', width = 3, height = 3)
+
+# tAI
+cf <- count_codons(Biostrings::readDNAStringSet(in_fa))
+cubar_w <- est_trna_weight(yeast_trna_gcn, s = list(IC = 0.28, IA = 0.9999, GU = 0.41, UG = 0.68, IU = 0))
+cubar_tai <- get_tai(cf, cubar_w[-33,])
+
+codon_table = get_codon_table()
+codon_table[, anticodon := as.character(Biostrings::reverseComplement(Biostrings::DNAStringSet(codon_table$codon)))]
+codon_table[, ac_level := yeast_trna_gcn[paste(amino_acid, anticodon, sep = '-')]]
+codon_table$ac_level[is.na(codon_table$ac_level)] <- 0
+tai_w <- tAI::get.ws(tRNA=codon_table$ac_level, sking=0)
+tai_tai <- tAI::get.tai(cf[, codon_table$codon[c(-11, -12, -15, -36)]],tai_w)
+
+tai_comp <- cbind(data.frame(tai_tai), data.frame(cubar_tai))
+ggplot(tai_comp, aes(x = cubar_tai, y = tai_tai)) +
+     geom_point_rast(pch = 1, size = 0.5, alpha = 0.4) +
+     labs(title = "tAI",
+          x = "cubar", y = "tAI") +
+     theme_bw() +
+     theme(panel.grid=element_blank(),
+           plot.title = element_text(hjust = 0.5, family = "sans", size = 12),
+           axis.text = element_text(color = "black", size = 10)  )
+ggsave('figures/tai_comp.pdf', width = 3, height = 3)
+```
+
+save the ENC index values and copy the content of the output to codonu_enc.txt and dambe_enc.txt
+```{python}
+# CodonU ENC
+an.calculate_enc(in_fa, genetic_code_num = 1, gene_analysis=True, save_file = True)
+```
+
+```{r}
+# cubar ENC
+cubar_enc <- get_enc(count_codons(Biostrings::readDNAStringSet(in_fa)), level = 'subfam')
+# CodonW ENC
+codonw_enc <- read.table('yeast_enc1.txt', header = T)
+#codonw_enc$Nc <- as.numeric(codonw_enc$Nc)
+# DAMBE ENC
+dambe_enc <- read.table('dambe_enc.txt', header = T)
+#dambe_enc <- dambe_enc$Nc
+# CodonU ENC
+codonu_enc <- read.table('codonu_enc.txt', col.names = c('gene_id', 'CodonU'))
+
+enc_comp <- cbind(as.data.frame(cubar_enc), codonw_enc$Nc, dambe_enc$Nc)
+enc_comp$gene_id <- rownames(enc_comp)
+enc_comp <- enc_comp %>% left_join(codonu_enc, by = 'gene_id')
+colnames(enc_comp)[1:3] <- c('cubar', 'CodonW', 'DAMBE')
+enc_comp$CodonW <- as.numeric(enc_comp$CodonW)
+
+scatter_hexbin <- function(data, mapping, ...) {
+  ggplot(data = data, mapping = mapping) +
+    geom_hex(...) +
+    scale_fill_viridis_c()
+}
+
+ggpairs(enc_comp[,c(1:3,5)],
+        upper = list(continuous = wrap("cor", color = "black")), 
+        lower = list(continuous = scatter_hexbin),
+       ) +
+     theme_bw() +
+     theme(panel.grid=element_blank(),
+           axis.text = element_text(color = "black", size = 11),
+           strip.background = element_blank()  )
+
+ggsave('figures/enc_comp.pdf', width = 8.5, height = 5.5)
+```

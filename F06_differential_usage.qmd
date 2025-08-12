@@ -33,6 +33,7 @@ yeast_exp2 <- yeast_exp |>
 
 yeast_cds_qc <- yeast_cds_qc[names(yeast_cds_qc) %in% yeast_exp2$gene_id]
 yeast_cds_qc <- yeast_cds_qc[yeast_exp2$gene_id]
+yeast_cds_qc
 yeast_cf <- count_codons(yeast_cds_qc)
 ```
 
@@ -89,7 +90,8 @@ ggplot(tmp, aes(x = codon, y = log2(or))) +
     theme_bw(base_size = 12) +
     theme(axis.text = element_text(color = 'black'),
           axis.text.x = element_text(
-              family = 'Courier', angle = 90, vjust = 0.5, hjust = 1)) +
+              family = 'Courier', angle = 90, vjust = 0.5, hjust = 1),
+          panel.grid=element_blank()) +
     theme(strip.background = element_blank())
 ggsave('figures/yeast_heg_leg_diff_cub.pdf', width = 10, height = 3)
 ```
@@ -107,33 +109,198 @@ ggplot(yeast_exp2, aes(x = fpkm, y = dp)) +
     geom_hex() +
     scale_x_log10() +
     scale_fill_viridis_c() +
-    labs(x = 'Gene expression level (RPKM)', y = 'Dp', fill = 'Genes') +
+    labs(x = 'Gene expression level (FPKM)', y = 'Dp', fill = 'Genes') +
     theme_bw(base_size = 12) +
-    theme(axis.text = element_text(color = 'black'))
+    theme(axis.text = element_text(color = 'black'),
+          panel.grid=element_blank())
 ggsave('figures/yeast_dp_vs_fpkm.pdf', width = 4, height = 3)
 # Spearman correlation
-cor.test(log10(yeast_exp2$fpkm), yeast_exp2$dp, method = "spearman")$p.value # 1.355655e-17
+cor.test(log10(yeast_exp2$fpkm), yeast_exp2$dp, method = "spearman")$p.value # 1.09896e-37
 ```
 
 Comparison with random CDSs
 
 ```{r}
-# generate random sequences with similar length distributions
-gen_random_cds <- function(){
-    set.seed(2024)
-    lens <- width(yeast_cds_qc)  # sample(width(yeast_cds_qc), 1000)
-    codon_table <- get_codon_table() |> filter(amino_acid != '*')
-    seqs <- sapply(lens, function(len){
-        str_c(sample(codon_table$codon, len, replace = TRUE), collapse = '')
-    })
-    DNAStringSet(seqs)
+set.seed(2024)
+yeast_cds_1000 <- sample(yeast_cds_qc, size = 1000)
+yeast_cds_1000
+yeast_cds_cf_1000 <- count_codons(yeast_cds_1000)
+gen_matched_random_cds <- function(matched_yeast_cds) {
+  set.seed(2024)
+  target_aa_freq <- get_aau(count_codons(matched_yeast_cds))
+  codon_table <- get_codon_table() |> filter(amino_acid != '*')
+  target_aa_len <- length(matched_yeast_cds)/3
+  # sample aa by its frequency
+  aa_pool <- colnames(target_aa_freq)
+  aa_probs <- as.numeric(target_aa_freq)
+  sampled_aas <- sample(aa_pool, size = target_aa_len, replace = TRUE, prob = aa_probs)
+  
+  # select one codon randomly for every aa
+  seq <- sapply(sampled_aas, function(aa) {
+    possible_codons <- codon_table$codon[codon_table$amino_acid == aa]
+    sample(possible_codons, 1)
+  })
+  DNAString(paste(seq, collapse = ""))
 }
 
-cds_rand <- gen_random_cds()
-cds_rand_cf <- count_codons(cds_rand)
+random_seq_1000 <- lapply(yeast_cds_1000, gen_matched_random_cds)
+names(random_seq_1000) <- paste0(names(random_seq_1000), '_ran')
+random_seq_1000 <- DNAStringSet(random_seq_1000)
+random_seq_1000
+cds_rand_with_ATG_1000 <- xscat(DNAString("ATG"), random_seq_1000)
+cds_rand_with_ATG_1000
+saveRDS(cds_rand_with_ATG_1000, 'cds_rand_with_ATG_1000.rds')
+
+# not contain start codon
+cds_rand_cf <- count_codons(random_seq_1000)
+
+# PCA analysis before optimization
+combined_data <- rbind(yeast_cf[yeast_heg$gene_id, ],yeast_cf[!rownames(yeast_cf) %in% yeast_heg$gene_id,], cds_rand_cf)
+groups <- factor(c(rep("Yeast", 5554), rep("Yeast HEG", 500), rep("Random", 1000)))
+# normalize
+row_normalized <- t(scale(t(combined_data))) 
+# run PCA
+pca_result <- prcomp(row_normalized, scale. = FALSE)
+# plot
+pca_df <- data.frame(PC1 = pca_result$x[,1], 
+                     PC2 = pca_result$x[,2],
+                     Group = groups)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+#  stat_ellipse(level = 0.95) + 
+  ggthemes::scale_fill_colorblind() +
+  ggthemes::scale_color_colorblind() +
+  labs(x = paste0("PC1 (", round(summary(pca_result)$importance[2,1]*100, 1), "%)"),
+       y = paste0("PC2 (", round(summary(pca_result)$importance[2,2]*100, 1), "%)"),
+       fill = NULL, color = NULL) +
+  theme_bw(base_size = 12) +
+  theme(axis.text = element_text(color = 'black'),
+        legend.position = 'right',
+        legend.justification.inside = c(0.95, 0.95),
+        panel.grid=element_blank())
+ggsave('figures/pca_before_optimization.pdf', width = 4.5, height = 3)
+
+library(umap)
+
+set.seed(2024)
+umap_result <- umap(row_normalized, n_components = 2)
+umap_df <- data.frame(
+  UMAP1 = umap_result$layout[,1],
+  UMAP2 = umap_result$layout[,2],
+  Group = groups
+)
+ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+  ggthemes::scale_color_colorblind() +  
+  labs(
+    x = "UMAP Dimension 1",
+    y = "UMAP Dimension 2",
+    color = NULL
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text = element_text(color = "black"),
+    legend.position = "right",
+    panel.grid = element_blank()
+  )
+ggsave("figures/yeast_rand_umap.pdf", width = 4.5, height = 3)
+
+# pca with highly expressed genes
+yeast_heg_rand_cf <- rbind(yeast_cf[yeast_heg$gene_id, ], cds_rand_cf)
+groups <- factor(c(rep("Yeast", 500), rep("Random", 1000)))
+# normalize
+row_normalized <- t(scale(t(yeast_heg_rand_cf))) 
+# run PCA
+pca_result <- prcomp(row_normalized, scale. = FALSE)
+# plot
+pca_df <- data.frame(PC1 = pca_result$x[,1], 
+                     PC2 = pca_result$x[,2],
+                     Group = groups)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+#  stat_ellipse(level = 0.95) + 
+  ggthemes::scale_fill_colorblind() +
+  ggthemes::scale_color_colorblind() +
+  labs(x = paste0("PC1 (", round(summary(pca_result)$importance[2,1]*100, 1), "%)"),
+       y = paste0("PC2 (", round(summary(pca_result)$importance[2,2]*100, 1), "%)"),
+       fill = NULL, color = NULL) +
+  theme_bw(base_size = 12) +
+  theme(axis.text = element_text(color = 'black'),
+        legend.text = element_text(size = 10),
+        legend.position = 'right',
+     #   legend.justification.inside = c(1, 0),
+        legend.background = element_blank(),  
+        legend.key = element_blank(),
+        panel.grid=element_blank())
+ggsave('figures/yeast_heg_rand_pca.pdf', width = 4.5, height = 3)
+
+set.seed(2024)
+umap_result <- umap(row_normalized, n_components = 2)
+umap_df <- data.frame(
+  UMAP1 = umap_result$layout[,1],
+  UMAP2 = umap_result$layout[,2],
+  Group = groups
+)
+ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+  ggthemes::scale_color_colorblind() +  
+  labs(
+    x = "UMAP Dimension 1",
+    y = "UMAP Dimension 2",
+    color = NULL
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text = element_text(color = "black"),
+    legend.position = "right",
+    panel.grid = element_blank()
+  )
+ggsave("figures/yeast_1000_rand_umap.pdf", width = 4.5, height = 3)
+
+library(Rtsne) 
+
+set.seed(2024) 
+duplicates <- duplicated(row_normalized)
+sum(duplicates) 
+row_normalized_unique <- row_normalized[!duplicates, ]
+groups_unique <- groups[!duplicates] 
+tsne_result <- Rtsne(
+  row_normalized_unique,
+  dims = 2,          
+  perplexity = 30,   
+  theta = 0.5,       
+  verbose = TRUE     
+)
+
+tsne_df <- data.frame(
+  tSNE1 = tsne_result$Y[, 1],
+  tSNE2 = tsne_result$Y[, 2],
+  Group = groups_unique
+)
+
+ggplot(tsne_df, aes(x = tSNE1, y = tSNE2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+  ggthemes::scale_color_colorblind() + 
+  labs(
+    x = "t-SNE Dimension 1",
+    y = "t-SNE Dimension 2",
+    color = NULL
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text = element_text(color = "black"),
+    legend.position = "right",
+    panel.grid = element_blank()
+  )
+
+
+ggsave("figures/yeast_rand_tsne.pdf", width = 4.5, height = 3)
+
 
 cds_rand_dp <- get_dp(cds_rand_cf, yeast_trna_w)
-cds_rand_dp <- tibble(gene_id = str_c(names(yeast_cds_qc), '_rand'), dp = cds_rand_dp)
+cds_rand_dp <- tibble(gene_id = str_c(names(yeast_cds_1000), '_ran'), dp = cds_rand_dp)
 
 plt <- bind_rows(Random = cds_rand_dp, Yeast = yeast_exp2[c('gene_id', 'dp')], .id = 'grp')
 # plt <- mutate(plt, grp = fct_relevel(grp, 'Yeast'))
@@ -146,12 +313,16 @@ ggplot(plt, aes(x = dp, fill = grp, color = grp)) +
     theme_bw(base_size = 12) +
     theme(axis.text = element_text(color = 'black'),
           legend.position = 'inside',
-          legend.justification.inside = c(0.95, 0.95))
+          legend.justification.inside = c(0.95, 0.95),
+          panel.grid=element_blank()) +
+    annotate('text', x = 0.5, y = 5.7,
+             label = 'atop(italic(P) == 2.5%*%10^-35)', size = 4, parse = TRUE)
 ggsave('figures/yeast_dp_vs_random.pdf', width = 3, height = 3)
 
-ks.test(cds_rand_dp$dp, yeast_exp2$dp)$p.value # 0
+# ks.test(cds_rand_dp$dp, yeast_exp2$dp)$p.value
+# Wilcoxon signed-rank test
+wilcox.test(cds_rand_dp$dp, yeast_exp2$dp, alternative = "greater", mu = 0)$p.value # 2.528873e-35
 ```
-
 # sequence optimization
 
 ```{r}
@@ -159,12 +330,17 @@ yeast_opt <- est_optimal_codons(
     yeast_cf[yeast_exp2$gene_id, ],
     gene_score = log1p(yeast_exp2$fpkm))
 
-cds_opt <- lapply(cds_rand, \(x) codon_optimize(x, optimal_codons = yeast_opt))
-cds_opt <- as(cds_opt, 'DNAStringSet')
-cds_opt_cf <- count_codons(cds_opt)
+# naive method
+cds_opt <- lapply(cds_rand_with_ATG_1000, \(x) codon_optimize(x, optimal_codons = yeast_opt))
+cds_opt2 <- as(cds_opt, 'DNAStringSet')
+cds_opt2
+# remove start codon
+cds_opt2 <- check_cds(cds_opt2, rm_start = TRUE,  rm_stop = FALSE, check_len = FALSE, check_start = FALSE, check_stop = FALSE, check_istop = FALSE)
+cds_opt2
+cds_opt_cf <- count_codons(cds_opt2)
 
 cds_opt_tab <- tibble(
-    gene_id = cds_rand_dp$gene_id,
+    gene_id = random_seq_1000$gene_id,
     tai = get_tai(cds_rand_cf, trna_w = yeast_trna),
     tai_opt = get_tai(cds_opt_cf, trna_w = yeast_trna))
 
@@ -173,9 +349,700 @@ ggplot(cds_opt_tab, aes(x = tai, y = tai_opt)) +
     geom_abline(linetype = 2, color = 'blue') +
     labs(x = 'tAI before optimizaiton', y = 'tAI after optimization', fill = 'Genes') +
     scale_fill_viridis_c() +
-    coord_cartesian(xlim = c(0.21, 0.49), ylim = c(0.21, 0.49), expand = FALSE) +
+    coord_cartesian(xlim = c(0.17, 0.63), ylim = c(0.17, 0.63), expand = FALSE) +
     theme_bw(base_size = 12) +
-    theme(axis.text = element_text(color = 'black'))
+    theme(axis.text = element_text(color = 'black'),
+          panel.grid=element_blank())
 ggsave('figures/random_optimize_to_yeast.pdf', width = 4, height = 3)
-```
 
+# optimize with CodonTransformer
+cds_rand_with_ATG_1000 <- readRDS('./cds_rand_with_ATG_1000.rds')
+cds_rand_with_ATG_1000
+seq_along(cds_rand_with_ATG_1000)
+for (i in seq_along(cds_rand_with_ATG_1000)){
+  print(i)
+  result <- codon_optimize(cds_rand_with_ATG_1000[[i]], method = "CodonTransformer", organism = "Saccharomyces cerevisiae")
+  saveRDS(result, file.path(paste0("./randomcds_optimize_1000/opt_ctf_", i, ".rds")))
+}
+# check 1000 rds files
+for(i in seq_along(cds_rand_with_ATG_1000)){if(!file.exists(paste0('./randomcds_optimize/opt_ctf_', i, '.rds'))){print(i)} }
+
+files <- list.files('./randomcds_optimize_1000', pattern = "opt_ctf_.*\\.rds", full.names = TRUE)
+file_numbers <- as.numeric(stringr::str_extract(files, "(?<=opt_ctf_)\\d+"))
+files_sorted <- files[order(file_numbers)]
+cds_opt_ctf <- lapply(files_sorted, readRDS)
+cds_opt_ctf2 <- as(cds_opt_ctf, 'DNAStringSet')
+cds_opt_ctf2
+# remove start codon
+cds_opt_ctf2 <- check_cds(cds_opt_ctf2, rm_start = TRUE,  rm_stop = FALSE, check_len = FALSE, check_start = FALSE, check_stop = FALSE, check_istop = FALSE)
+cds_opt_ctf2
+cds_opt_ctf_cf <- count_codons(cds_opt_ctf2)
+
+cds_opt_ctf_tab <- tibble(
+    gene_id = cds_rand_dp$gene_id,
+    tai = get_tai(cds_rand_cf, trna_w = yeast_trna),
+    tai_opt = get_tai(cds_opt_ctf_cf, trna_w = yeast_trna))
+
+ggplot(cds_opt_ctf_tab, aes(x = tai, y = tai_opt)) +
+    geom_hex() +
+    geom_abline(linetype = 2, color = 'blue') +
+    labs(x = 'tAI before optimizaiton', y = 'tAI after optimization using CodonTransformer', fill = 'Genes') +
+    scale_fill_viridis_c() +
+    coord_cartesian(xlim = c(0.17, 0.67), ylim = c(0.17, 0.67), expand = FALSE) +
+    theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'),
+          axis.title.y = element_text(color = 'black', size = 9),
+          panel.grid=element_blank())
+    
+    
+ggsave('figures/random_optimize_to_yeast_codontransformer.pdf', width = 4, height = 3)
+
+# optimize with IDT
+cds_opt_idt <- lapply(cds_rand_with_ATG_1000, \(x) codon_optimize(x, cf = yeast_cf, method = "IDT"))
+cds_opt_idt2 <- as(cds_opt_idt, 'DNAStringSet')
+cds_opt_idt2
+# remove start codon
+cds_opt_idt2 <- check_cds(cds_opt_idt2, rm_start = TRUE,  rm_stop = FALSE, check_len = FALSE, check_start = FALSE, check_stop = FALSE, check_istop = FALSE)
+cds_opt_idt2
+cds_opt_idt_cf <- count_codons(cds_opt_idt2)
+
+cds_opt_tab <- tibble(
+    gene_id = random_seq_1000$gene_id,
+    tai = get_tai(cds_rand_cf, trna_w = yeast_trna),
+    tai_opt = get_tai(cds_opt_idt_cf, trna_w = yeast_trna))
+
+ggplot(cds_opt_tab, aes(x = tai, y = tai_opt)) +
+    geom_hex() +
+    geom_abline(linetype = 2, color = 'blue') +
+    labs(x = 'tAI before optimizaiton', y = 'tAI after optimization using IDT', fill = 'Genes') +
+    scale_fill_viridis_c() +
+    coord_cartesian(xlim = c(0.17, 0.43), ylim = c(0.17, 0.43), expand = FALSE) +
+    theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'),
+          panel.grid=element_blank())
+ggsave('figures/random_optimize_to_yeast_idt.pdf', width = 4, height = 3)
+
+
+#  ridgeline plot
+library(ggridges)
+tai_ridge_df <- rbind(cbind(data.frame(tAI = get_tai(cds_rand_cf, trna_w = yeast_trna)), Group = 'Simulated'),
+                      cbind(data.frame(tAI = get_tai(cds_opt_cf, trna_w = yeast_trna)), Group = 'Naive'),
+                      cbind(data.frame(tAI = get_tai(cds_opt_idt_cf, trna_w = yeast_trna)), Group = 'IDT'),
+                      cbind(data.frame(tAI = get_tai(cds_opt_ctf_cf, trna_w = yeast_trna)), Group = 'CodonTransformer')
+                      )
+tai_ridge_df$Group <- factor(tai_ridge_df$Group, level = c('CodonTransformer', 'IDT', 'Naive', 'Simulated'))
+
+ggplot(tai_ridge_df, aes(x = tAI, y = Group, fill = Group)) +
+	geom_density_ridges() +
+  scale_y_discrete(limits = rev) +
+  scale_fill_brewer(palette = "Dark2") +
+  theme_bw(base_size = 12) +
+  theme(axis.text = element_text(color = 'black'),
+        panel.grid=element_blank(),
+        axis.title.y = element_blank(),
+        legend.position = "none")
+ggsave('figures/tAI_ridgeline.pdf', width = 3.8, height = 3)
+
+ggplot(tai_ridge_df, aes(x = tAI, y = Group, fill = Group)) +
+#	stat_density_ridges(geom = "density_ridges_gradient", calc_ecdf = TRUE) +
+#  scale_fill_viridis_c(name = "tAI probability", direction = -1) +
+  theme_bw(base_size = 12) +
+  theme(axis.text = element_text(color = 'black'),
+        panel.grid=element_blank())
+
+# PCA analysis after optimization
+yeast_opt_cf <- rbind(yeast_cf[yeast_heg$gene_id, ],yeast_cf[!rownames(yeast_cf) %in% yeast_heg$gene_id,], cds_opt_cf)
+groups <- factor(c(rep("Yeast", 5554), rep("Yeast HEG", 500), rep("Optimization", 1000)))
+# normalize
+row_normalized <- t(scale(t(yeast_opt_cf))) 
+# run PCA
+pca_result <- prcomp(row_normalized, scale. = FALSE)
+# plot
+pca_df <- data.frame(PC1 = pca_result$x[,1], 
+                     PC2 = pca_result$x[,2],
+                     Group = groups)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+#  stat_ellipse(level = 0.95) + 
+  ggthemes::scale_fill_colorblind() +
+  ggthemes::scale_color_colorblind() +
+  labs(x = paste0("PC1 (", round(summary(pca_result)$importance[2,1]*100, 1), "%)"),
+       y = paste0("PC2 (", round(summary(pca_result)$importance[2,2]*100, 1), "%)"),
+       fill = NULL, color = NULL) +
+  theme_bw(base_size = 12) +
+  theme(axis.text = element_text(color = 'black'),
+        legend.text = element_text(size = 10),
+        legend.position = 'right',
+     #   legend.justification.inside = c(1, 0),
+        legend.background = element_blank(),  
+        legend.key = element_blank(),
+        panel.grid=element_blank())
+ggsave('figures/yeast_opt_pca.pdf', width = 4.5, height = 3)
+
+set.seed(2024)
+umap_result <- umap(row_normalized, n_components = 2)
+umap_df <- data.frame(
+  UMAP1 = umap_result$layout[,1],
+  UMAP2 = umap_result$layout[,2],
+  Group = groups
+)
+ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+  ggthemes::scale_color_colorblind() +  
+  labs(
+    x = "UMAP Dimension 1",
+    y = "UMAP Dimension 2",
+    color = NULL
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text = element_text(color = "black"),
+    legend.position = "right",
+    panel.grid = element_blank()
+  )
+ggsave("figures/yeast_opt_umap.pdf", width = 4.5, height = 3)
+
+# pca with highly expressed genes
+yeast_heg_opt_cf <- rbind(yeast_cf[yeast_heg$gene_id, ], cds_opt_cf)
+groups <- factor(c(rep("Yeast", 500), rep("Optimization", 1000)))
+# normalize
+row_normalized <- t(scale(t(yeast_heg_opt_cf))) 
+# run PCA
+pca_result <- prcomp(row_normalized, scale. = FALSE)
+# plot
+pca_df <- data.frame(PC1 = pca_result$x[,1], 
+                     PC2 = pca_result$x[,2],
+                     Group = groups)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+#  stat_ellipse(level = 0.95) + 
+  ggthemes::scale_fill_colorblind() +
+  ggthemes::scale_color_colorblind() +
+  labs(x = paste0("PC1 (", round(summary(pca_result)$importance[2,1]*100, 1), "%)"),
+       y = paste0("PC2 (", round(summary(pca_result)$importance[2,2]*100, 1), "%)"),
+       fill = NULL, color = NULL) +
+  theme_bw(base_size = 12) +
+  theme(axis.text = element_text(color = 'black'),
+        legend.text = element_text(size = 10),
+        legend.position = 'right',
+     #   legend.justification.inside = c(1, 0),
+        legend.background = element_blank(),  
+        legend.key = element_blank(),
+        panel.grid=element_blank())
+ggsave('figures/yeast_heg_opt_pca.pdf', width = 4.5, height = 3)
+
+set.seed(2024)
+umap_result <- umap(row_normalized, n_components = 2)
+umap_df <- data.frame(
+  UMAP1 = umap_result$layout[,1],
+  UMAP2 = umap_result$layout[,2],
+  Group = groups
+)
+ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+  ggthemes::scale_color_colorblind() +  
+  labs(
+    x = "UMAP Dimension 1",
+    y = "UMAP Dimension 2",
+    color = NULL
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text = element_text(color = "black"),
+    legend.position = "right",
+    panel.grid = element_blank()
+  )
+ggsave("figures/yeast_1000_opt_umap.pdf", width = 4.5, height = 3)
+
+set.seed(2024) 
+duplicates <- duplicated(row_normalized)
+sum(duplicates) 
+row_normalized_unique <- row_normalized[!duplicates, ]
+groups_unique <- groups[!duplicates] 
+tsne_result <- Rtsne(
+  row_normalized_unique,
+  dims = 2,          
+  perplexity = 30,   
+  theta = 0.5,       
+  verbose = TRUE     
+)
+
+# 3. 转换为绘图数据框
+tsne_df <- data.frame(
+  tSNE1 = tsne_result$Y[, 1],
+  tSNE2 = tsne_result$Y[, 2],
+  Group = groups_unique
+)
+
+# 4. 绘图
+ggplot(tsne_df, aes(x = tSNE1, y = tSNE2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+  ggthemes::scale_color_colorblind() +  # 颜色盲友好调色板
+  labs(
+    x = "t-SNE Dimension 1",
+    y = "t-SNE Dimension 2",
+    color = NULL
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text = element_text(color = "black"),
+    legend.position = "right",
+    panel.grid = element_blank()
+  )
+
+ggsave("figures/yeast_opt_tsne.pdf", width = 4.5, height = 3)
+
+# PCA analysis after optimization using CodonTransformer
+yeast_opt_ctf_cf <- rbind(yeast_cf[yeast_heg$gene_id, ],yeast_cf[!rownames(yeast_cf) %in% yeast_heg$gene_id,], cds_opt_ctf_cf)
+groups <- factor(c(rep("Yeast", 5554), rep("Yeast HEG", 500), rep("Optimization", 1000)))
+
+#yeast_opt_ctf_cf <- rbind(yeast_cf, cds_opt_ctf_cf)
+#groups <- factor(c(rep("Yeast", 6054), rep("Optimization", 1000)))
+
+# normalize
+row_normalized <- t(scale(t(yeast_opt_ctf_cf))) 
+# run PCA
+pca_result <- prcomp(row_normalized, scale. = FALSE)
+# plot
+pca_df <- data.frame(PC1 = pca_result$x[,1], 
+                     PC2 = pca_result$x[,2],
+                     Group = groups)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+#  stat_ellipse(level = 0.95) + 
+  ggthemes::scale_fill_colorblind() +
+  ggthemes::scale_color_colorblind() +
+  labs(x = paste0("PC1 (", round(summary(pca_result)$importance[2,1]*100, 1), "%)"),
+       y = paste0("PC2 (", round(summary(pca_result)$importance[2,2]*100, 1), "%)"),
+       fill = NULL, color = NULL) +
+  theme_bw(base_size = 12) +
+  theme(axis.text = element_text(color = 'black'),
+        legend.text = element_text(size = 10),
+        legend.position = 'right',
+        # legend.justification.inside = c(1, 0),
+        legend.background = element_blank(),  
+        legend.key = element_blank(),
+        panel.grid=element_blank())
+ggsave('figures/yeast_opt_ctf_pca.pdf', width = 4.5, height = 3)
+
+# correlation of PC1 and expression level
+plot(pca_df$PC1[1:6054], yeast_exp2$fpkm)
+
+pc1_exp_df <- data.frame(PC1 = pca_df$PC1[1:6054], 
+                     exp = yeast_exp2$fpkm)
+
+ggplot(pc1_exp_df, aes(x = PC1, y = exp)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+  scale_y_log10() +
+  labs(x = "PC1 in PCA analysis",
+       y = "Expression level (FPKM)",
+       fill = NULL, color = NULL) +
+  theme_bw(base_size = 12) +
+  theme(axis.text = element_text(color = 'black'),
+        panel.grid=element_blank()) +
+  stat_cor(method = "spearman", cor.coef.name = "rho", size = 3, label.x.npc = 0, label.y.npc = 1)
+ggsave('figures/yeast_opt_ctf_pc1_exp.pdf', width = 3, height = 3)
+
+# UMAP
+set.seed(2024)
+umap_result <- umap(row_normalized, n_components = 2)
+umap_df <- data.frame(
+  UMAP1 = umap_result$layout[,1],
+  UMAP2 = umap_result$layout[,2],
+  Group = groups
+)
+ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+  ggthemes::scale_color_colorblind() +  
+  labs(
+    x = "UMAP Dimension 1",
+    y = "UMAP Dimension 2",
+    color = NULL
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text = element_text(color = "black"),
+    legend.position = "right",
+    panel.grid = element_blank()
+  )
+ggsave("figures/yeast_opt_ctf_umap.pdf", width = 4.5, height = 3)
+
+# pca with highly expressed genes
+yeast_heg_opt_ctf_cf <- rbind(yeast_cf[yeast_heg$gene_id, ], cds_opt_ctf_cf)
+groups <- factor(c(rep("Yeast", 500), rep("Optimization", 1000)))
+# normalize
+row_normalized <- t(scale(t(yeast_heg_opt_ctf_cf))) 
+# run PCA
+pca_result <- prcomp(row_normalized, scale. = FALSE)
+# plot
+pca_df <- data.frame(PC1 = pca_result$x[,1], 
+                     PC2 = pca_result$x[,2],
+                     Group = groups)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+#  stat_ellipse(level = 0.95) + 
+  ggthemes::scale_fill_colorblind() +
+  ggthemes::scale_color_colorblind() +
+  labs(x = paste0("PC1 (", round(summary(pca_result)$importance[2,1]*100, 1), "%)"),
+       y = paste0("PC2 (", round(summary(pca_result)$importance[2,2]*100, 1), "%)"),
+       fill = NULL, color = NULL) +
+  theme_bw(base_size = 12) +
+  theme(axis.text = element_text(color = 'black'),
+        legend.text = element_text(size = 10),
+        legend.position = 'right',
+     #   legend.justification.inside = c(1, 0),
+        legend.background = element_blank(),  
+        legend.key = element_blank(),
+        panel.grid=element_blank())
+ggsave('figures/yeast_heg_opt_ctf_pca.pdf', width = 4.5, height = 3)
+
+# UMAP
+set.seed(2024)
+umap_result <- umap(row_normalized, n_components = 2)
+umap_df <- data.frame(
+  UMAP1 = umap_result$layout[,1],
+  UMAP2 = umap_result$layout[,2],
+  Group = groups
+)
+ggplot(umap_df[umap_df$UMAP1 <30,], aes(x = UMAP1, y = UMAP2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+  ggthemes::scale_color_colorblind() +  
+  labs(
+    x = "UMAP Dimension 1",
+    y = "UMAP Dimension 2",
+    color = NULL
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text = element_text(color = "black"),
+    legend.position = "right",
+    panel.grid = element_blank()
+  )
+ggsave("figures/yeast_1000_opt_ctf_umap.pdf", width = 4.5, height = 3)
+
+set.seed(2024) 
+duplicates <- duplicated(row_normalized)
+sum(duplicates) 
+row_normalized_unique <- row_normalized[!duplicates, ]
+groups_unique <- groups[!duplicates] 
+tsne_result <- Rtsne(
+  row_normalized_unique,
+  dims = 2,          
+  perplexity = 30,   
+  theta = 0.5,       
+  verbose = TRUE     
+)
+
+tsne_df <- data.frame(
+  tSNE1 = tsne_result$Y[, 1],
+  tSNE2 = tsne_result$Y[, 2],
+  Group = groups_unique
+)
+
+
+ggplot(tsne_df, aes(x = tSNE1, y = tSNE2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+  ggthemes::scale_color_colorblind() + 
+  labs(
+    x = "t-SNE Dimension 1",
+    y = "t-SNE Dimension 2",
+    color = NULL
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text = element_text(color = "black"),
+    legend.position = "right",
+    panel.grid = element_blank()
+  )
+
+ggsave("figures/yeast_ctf_tsne.pdf", width = 4.5, height = 3)
+
+# PCA analysis after optimization using IDT
+yeast_opt_idt_cf <- rbind(yeast_cf[yeast_heg$gene_id, ],yeast_cf[!rownames(yeast_cf) %in% yeast_heg$gene_id,], cds_opt_idt_cf)
+groups <- factor(c(rep("Yeast", 5554), rep("Yeast HEG", 500), rep("Optimization", 1000)))
+# normalize
+row_normalized <- t(scale(t(yeast_opt_idt_cf))) 
+# run PCA
+pca_result <- prcomp(row_normalized, scale. = FALSE)
+# plot
+pca_df <- data.frame(PC1 = pca_result$x[,1], 
+                     PC2 = pca_result$x[,2],
+                     Group = groups)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+#  stat_ellipse(level = 0.95) + 
+  ggthemes::scale_fill_colorblind() +
+  ggthemes::scale_color_colorblind() +
+  labs(x = paste0("PC1 (", round(summary(pca_result)$importance[2,1]*100, 1), "%)"),
+       y = paste0("PC2 (", round(summary(pca_result)$importance[2,2]*100, 1), "%)"),
+       fill = NULL, color = NULL) +
+  theme_bw(base_size = 12) +
+  theme(axis.text = element_text(color = 'black'),
+        legend.text = element_text(size = 10),
+        legend.position = 'right',
+        # legend.justification.inside = c(1, 0),
+        legend.background = element_blank(),  
+        legend.key = element_blank(),
+        panel.grid=element_blank())
+ggsave('figures/yeast_opt_idt_pca_1000.pdf', width = 4.5, height = 3)
+
+# UMAP
+set.seed(2024)
+umap_result <- umap(row_normalized, n_components = 2)
+umap_df <- data.frame(
+  UMAP1 = umap_result$layout[,1],
+  UMAP2 = umap_result$layout[,2],
+  Group = groups
+)
+ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+  ggthemes::scale_color_colorblind() +  
+  labs(
+    x = "UMAP Dimension 1",
+    y = "UMAP Dimension 2",
+    color = NULL
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text = element_text(color = "black"),
+    legend.position = "right",
+    panel.grid = element_blank()
+  )
+ggsave("figures/yeast_opt_idt_umap.pdf", width = 4.5, height = 3)
+
+# pca with highly expressed genes
+yeast_heg_opt_idt_cf <- rbind(yeast_cf[yeast_heg$gene_id, ], cds_opt_idt_cf)
+groups <- factor(c(rep("Yeast", 500), rep("Optimization", 1000)))
+# normalize
+row_normalized <- t(scale(t(yeast_heg_opt_idt_cf))) 
+# run PCA
+pca_result <- prcomp(row_normalized, scale. = FALSE)
+# plot
+pca_df <- data.frame(PC1 = pca_result$x[,1], 
+                     PC2 = pca_result$x[,2],
+                     Group = groups)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+#  stat_ellipse(level = 0.95) + 
+  ggthemes::scale_fill_colorblind() +
+  ggthemes::scale_color_colorblind() +
+  labs(x = paste0("PC1 (", round(summary(pca_result)$importance[2,1]*100, 1), "%)"),
+       y = paste0("PC2 (", round(summary(pca_result)$importance[2,2]*100, 1), "%)"),
+       fill = NULL, color = NULL) +
+  theme_bw(base_size = 12) +
+  theme(axis.text = element_text(color = 'black'),
+        legend.text = element_text(size = 10),
+        legend.position = 'right',
+     #   legend.justification.inside = c(1, 0),
+        legend.background = element_blank(),  
+        legend.key = element_blank(),
+        panel.grid=element_blank())
+ggsave('figures/yeast_heg_opt_idt_pca.pdf', width = 4.5, height = 3)
+
+# UMAP
+set.seed(2024)
+umap_result <- umap(row_normalized, n_components = 2)
+umap_df <- data.frame(
+  UMAP1 = umap_result$layout[,1],
+  UMAP2 = umap_result$layout[,2],
+  Group = groups
+)
+ggplot(umap_df[umap_df$UMAP1 < 40,], aes(x = UMAP1, y = UMAP2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+  ggthemes::scale_color_colorblind() +  
+  labs(
+    x = "UMAP Dimension 1",
+    y = "UMAP Dimension 2",
+    color = NULL
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text = element_text(color = "black"),
+    legend.position = "right",
+    panel.grid = element_blank()
+  )
+ggsave("figures/yeast_1000_opt_idt_umap.pdf", width = 4.5, height = 3)
+
+
+
+set.seed(2024) 
+duplicates <- duplicated(row_normalized)
+sum(duplicates) 
+row_normalized_unique <- row_normalized[!duplicates, ]
+groups_unique <- groups[!duplicates] 
+tsne_result <- Rtsne(
+  row_normalized_unique,
+  dims = 2,          
+  perplexity = 30,   
+  theta = 0.5,       
+  verbose = TRUE     
+)
+
+
+tsne_df <- data.frame(
+  tSNE1 = tsne_result$Y[, 1],
+  tSNE2 = tsne_result$Y[, 2],
+  Group = groups_unique
+)
+
+
+ggplot(tsne_df, aes(x = tSNE1, y = tSNE2, color = Group)) +
+  geom_point(alpha = 0.4, size = 0.7) +
+  ggthemes::scale_color_colorblind() + 
+  labs(
+    x = "t-SNE Dimension 1",
+    y = "t-SNE Dimension 2",
+    color = NULL
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text = element_text(color = "black"),
+    legend.position = "right",
+    panel.grid = element_blank()
+  )
+
+
+ggsave("figures/yeast_idt_tsne.pdf", width = 4.5, height = 3)
+```
+  
+```{r}
+# compare RSCU of optimized CDSs with yeast highly expressed genes
+rscu_rand <- cds_rand_cf |> get_rscu(level = 'amino_acid') |> as_tibble()
+plot_data <- data.frame(
+  HEG = rscu_heg$rscu,
+  RANDOM = rscu_rand$rscu
+)
+
+cor.test(plot_data$HEG, plot_data$RANDOM, method = 'spearman')
+
+ggplot(plot_data, aes(x = HEG, y = RANDOM)) +
+  geom_point(alpha = 0.6, size = 1) + 
+#  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "blue") +
+  labs(
+    x = "RSCU of HEGs",
+    y = "RSCU of before optimization",
+  ) +
+  theme_bw() + 
+  theme(
+    axis.text = element_text(color = 'black'),
+    panel.grid=element_blank()
+  ) +
+  annotate('text', x = 3.2, y = 0.94,
+           label = 'atop(italic(rho==0.64), italic(P) == 2.5%*%10^-8)', parse = TRUE)
+
+ggsave('figures/yeast_rand_rscu.pdf', width = 3, height = 3)
+
+rscu_opt <- cds_opt_cf |> get_rscu(level = 'amino_acid') |> as_tibble()
+plot_data <- data.frame(
+  HEG = rscu_heg$rscu,
+  OPT = rscu_opt$rscu
+)
+cor.test(plot_data$HEG, plot_data$OPT, method = 'spearman')
+
+p <- ggplot(plot_data, aes(x = HEG, y = OPT)) +
+  geom_point(alpha = 0.6, size = 1) + 
+  # geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "blue") +
+  labs(
+    x = "RSCU of HEGs",
+    y = "RSCU after optimization",
+  ) +
+  theme_bw() + 
+  theme(
+    axis.text = element_text(color = 'black'),
+    panel.grid=element_blank()
+  ) +
+  annotate('text', x = 3.2, y = 0.5,
+           label = 'atop(italic(rho==0.47), italic(P) == 1.1%*%10^-4)', parse = TRUE)
+ggsave('figures/yeast_opt_rscu.pdf', width = 3, height = 3)
+
+rscu_opt_ctf <- cds_opt_ctf_cf |> get_rscu(level = 'amino_acid') |> as_tibble()
+plot(rscu_heg$rscu, rscu_opt_ctf$rscu)
+plot_data <- data.frame(
+  HEG = rscu_heg$rscu,
+  OPT = rscu_opt_ctf$rscu
+)
+cor.test(plot_data$HEG, plot_data$OPT, method = 'spearman')
+
+ggplot(plot_data, aes(x = HEG, y = OPT)) +
+  geom_point(alpha = 0.6, size = 1) + 
+#  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "blue") + 
+  labs(
+    x = "RSCU of HEGs",
+    y = "RSCU after optimization",
+  #  title = "RSCU Comparison"
+  ) +
+  theme_bw() + 
+  theme(
+    axis.text = element_text(color = 'black'),
+    panel.grid=element_blank(),
+ #   axis.title.y = element_text(size = 9)
+  ) +
+  annotate('text', x = 3.2, y = 0.5,
+           label = 'atop(italic(rho==0.92), italic(P) == 8.3%*%10^-26)', parse = TRUE)
+ggsave('figures/yeast_opt_ctf_rscu.pdf', width = 3, height = 3)
+
+rscu_opt_idt <- cds_opt_idt_cf |> get_rscu(level = 'amino_acid') |> as_tibble()
+plot(rscu_heg$rscu, rscu_opt_idt$rscu)
+plot_data <- data.frame(
+  HEG = rscu_heg$rscu,
+  OPT = rscu_opt_idt$rscu
+)
+cor.test(plot_data$HEG, plot_data$OPT, method = 'spearman')
+
+ggplot(plot_data, aes(x = HEG, y = OPT)) +
+  geom_point(alpha = 0.6, size = 1) + 
+#  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "blue") + 
+  labs(
+    x = "RSCU of HEGs",
+    y = "RSCU after optimization",
+  #  title = "RSCU Comparison"
+  ) +
+  theme_bw() + 
+  theme(
+    axis.text = element_text(color = 'black'),
+    panel.grid=element_blank()
+  ) +
+  annotate('text', x = 3.2, y = 0.6,
+           label = 'atop(italic(rho==0.70), italic(P) == 3.7%*%10^-10)', parse = TRUE)
+ggsave('figures/yeast_opt_idt_rscu.pdf', width = 3, height = 3)
+
+
+# UMAP with highly expressed genes
+yeast_heg_opt_all_cf <- rbind(yeast_cf[yeast_heg$gene_id, ], cds_opt_cf, cds_opt_idt_cf, cds_opt_ctf_cf)
+groups <- factor(c(rep("Yeast HEGs", 500), rep("Naive", 1000),rep("IDT", 1000),rep("CodonTransformer", 1000)))
+# normalize
+row_normalized <- t(scale(t(yeast_heg_opt_all_cf))) 
+set.seed(2024)
+umap_result <- umap(row_normalized, n_components = 2)
+umap_df <- data.frame(
+  UMAP1 = umap_result$layout[,1],
+  UMAP2 = umap_result$layout[,2],
+  Group = groups
+)
+ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Group)) +
+  geom_point(size = 0.2) +
+  scale_color_brewer(palette = "Dark2") +
+  labs(
+    x = "UMAP 1",
+    y = "UMAP 2",
+    color = NULL
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text = element_text(color = "black"),
+    legend.position = "right",
+    panel.grid = element_blank()
+  ) +
+  guides(
+  color = guide_legend(
+    override.aes = list(size = 2)
+  )
+)
+ggsave("figures/yeast_opt_all_umap2.pdf", width = 5, height = 3)
+```

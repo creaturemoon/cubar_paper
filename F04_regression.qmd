@@ -76,8 +76,12 @@ plt |>
         scale_x_continuous(transform = 'log10') +
         facet_wrap(vars(codon), scales = 'free_y', nrow = 1) +
         theme_bw(base_size = 12) +
-        theme(strip.background = element_blank()) +
-        labs(x = 'Gene expression level (FPKM)', y = 'Usage among glycine codons')
+        theme(axis.text = element_text(color = 'black'),
+              strip.background = element_blank(),
+              panel.grid=element_blank()) +
+        labs(x = 'Gene expression level (FPKM)',
+             y = 'Usage among glycine codons',
+             fill = 'Count')
 ggsave('figures/codon_usage_vs_gene_expression_example.pdf', width = 12, height = 3)
 
 # count of amino acids with synonymous codons in each gene
@@ -98,6 +102,9 @@ ggplot(plt2, aes(x = total, color = amino_acid)) +
     scale_y_continuous(expand = expansion(mult = 0.01)) +
     cols4all::scale_color_discrete_c4a_cat('tol.rainbow') +
     theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'),
+          strip.background = element_blank(),
+          panel.grid=element_blank()) +
     guides(color = guide_legend(ncol = 2))
 ggsave('figures/yeast_amino_acid_usage.pdf', width = 5, height = 3)
 ```
@@ -177,6 +184,9 @@ opcodons_coef |>
 ggplot(opcodons_coef, aes(x = exp_pearson, y = exp_glm)) +
     geom_point() +
     theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'),
+          strip.background = element_blank(),
+          panel.grid=element_blank()) +
     geom_vline(xintercept = 0, linetype = 2, color = 'grey') +
     geom_hline(yintercept = 0, linetype = 2, color = 'grey') +
     labs(x = 'Correlation coefficient', y = 'GLM coefficient')
@@ -190,6 +200,9 @@ opcodons_pval <- opcodons |>
 ggplot(opcodons_pval, aes(x = log10(exp_pearson), y = log10(exp_glm))) +
     geom_point() +
     theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'),
+          strip.background = element_blank(),
+          panel.grid=element_blank()) +
     geom_abline(slope = 1, intercept = 0, linetype = 2, color = 'grey') +
     labs(x = 'log10(Correlation P value) ', y = 'log10(GLM P value)')
 ggsave('figures/yeast_exp_glm_pval_vs_pearson_corr.pdf', width = 3, height = 3)

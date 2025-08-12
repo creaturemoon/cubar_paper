@@ -59,6 +59,8 @@ ggplot(plt2, aes(x = center %/% 3, y = index)) +
     geom_smooth(se = FALSE) +
     labs(x = 'Codon distance', y = 'Window tAI') +
     theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'),
+          panel.grid=element_blank()) +
     theme(axis.text = element_text(color = 'black')) +
     scale_x_continuous(breaks = c(50, 500, 1000, 1500)) +
     coord_cartesian(xlim = c(50, 1525), expand = FALSE)
@@ -80,13 +82,14 @@ ggplot(tmp, aes(x = center %/% 3, y = index)) +
     geom_smooth(method = 'lm', se = FALSE) +
     labs(x = 'Codon position', y = 'Window tAI') +
     theme_bw(base_size = 12) +
-    theme(axis.text = element_text(color = 'black')) +
+    theme(axis.text = element_text(color = 'black'),
+          panel.grid=element_blank()) +
     scale_x_continuous(breaks = c(50, 500, 1000, 1500, 2000)) +
     coord_cartesian(xlim = c(50, max(tmp$center %/% 3)+25), expand = FALSE)
 ggsave('figures/sliding_window_longest_genes_example.pdf', width = 4, height = 3)
 
 cor.test(tmp$center, tmp$index)
-# p-value = 3.759e-12, corr = 0.4624482
+# p-value = 8.818e-11, corr = 0.4350352
 
 # check trend approaching stop codons;
 # not idea since last windows are not aligned
@@ -134,7 +137,9 @@ ggplot(plt2, aes(x = center %/% 3, y = index)) +
     geom_line() +
     labs(x = 'Codon position', y = 'Window tAI') +
     theme_bw(base_size = 12) +
-    theme(axis.text = element_text(color = 'black'))
+    theme(axis.text = element_text(color = 'black'),
+          panel.grid=element_blank()
+        )
 ggsave('figures/sliding_window_codom_ramp.pdf', width = 4, height = 3)
 
 yeast_all_swa_stat <- yeast_all_swa |> 
@@ -149,14 +154,34 @@ yeast_all_swa_stat <- yeast_all_swa |>
 yeast_all_swa_stat
 
 ggplot(yeast_all_swa_stat, aes(x = corr)) +
-    geom_histogram(fill = 'lightgrey') +
+    geom_histogram(fill = '#e69f00') +
     geom_vline(xintercept = 0, linetype = 2, color = 'black') +
-    labs(x = 'Window postion-tAI correlation', y = 'Number of genes') +
+    labs(x = 'Window position-tAI correlation', y = 'Number of genes') +
     theme_bw(base_size = 12) +
-    theme(axis.text = element_text(color = 'black'))
+    theme(axis.text = element_text(color = 'black'),
+          panel.grid=element_blank())
 ggsave('figures/sliding_window_trends_exclude_first50.pdf', width = 4, height = 3)
 # Wilcoxon signed-rank test
-wilcox.test(yeast_all_swa_stat$corr, alternative = "greater", mu = 0)$p.value # 1.484992e-72
+wilcox.test(yeast_all_swa_stat$corr, alternative = "greater", mu = 0)$p.value # 1.149948e-66
+
+yeast_all_swa_stat2 <- yeast_all_swa_stat |> 
+    mutate(gfpkm = cut_number(fpkm, n = 100)) |> 
+    group_by(gfpkm) |> 
+    summarise(corr = median(corr), fpkm = median(fpkm))
+
+cor.test(yeast_all_swa_stat2$corr, yeast_all_swa_stat2$fpkm, method = 'spearman')
+
+ggplot(yeast_all_swa_stat2, aes(x = corr, y = fpkm)) +
+    geom_point() + 
+    scale_y_log10() +
+    labs(x = 'Median window-tAI correlation', y = 'Median FPKM') +
+    geom_smooth(method = 'lm', se = FALSE, linetype = 2) +
+    theme_bw(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'),
+          panel.grid=element_blank()) +
+    annotate('text', x = -0.01, y = 1000,
+             label = 'atop(italic(rho==0.45), italic(P) == 3.9%*%10^-6)', parse = TRUE)
+ggsave('figures/window_tai_corr_vs_fpkm.pdf', width = 4, height = 3)
 
 tmp <- yeast_cds_qc[['YBR084C-A']] |> 
     slide_apply(get_tai, step = 3, before = 2, after = 2, trna_w = yeast_trna_w)
@@ -167,7 +192,8 @@ ggplot(tmp, aes(x = center %/% 3, y = index)) +
     geom_smooth(method = 'lm', se = FALSE) +
     labs(x = 'Codon position', y = 'Window tAI') +
     theme_bw(base_size = 12) +
-    theme(axis.text = element_text(color = 'black')) +
+    theme(axis.text = element_text(color = 'black'),
+          panel.grid=element_blank()) +
     scale_x_continuous(breaks = c(50, 100, 150)) +
     coord_cartesian(xlim = c(50, max(tmp$center %/% 3)+5), expand = FALSE)
 ggsave('figures/sliding_trends_example.pdf', width = 4, height = 3)
@@ -187,10 +213,27 @@ sigpos <- yeast_all_swa_stat |>
 
 sigpos_goa <- enrichGO(sigpos$gene_id, org.Sc.sgd.db, keyType = 'ORF', ont = 'ALL', qvalueCutoff = 0.05)
 sigpos_goa <- simplify(sigpos_goa)
-# only 15 significant categories
+# only 7 significant categories
 
-enrichplot::dotplot(sigpos_goa, showCategory = 20) + theme_bw(base_size = 12)
+enrichplot::dotplot(sigpos_goa, showCategory = 20) + 
+  theme_bw(base_size = 12) +
+  theme(axis.text = element_text(color = 'black'),
+        panel.grid=element_blank())
 ggsave('figures/sliding_trends_GO.pdf', width = 6, height = 6)
+
+sigpos_neg <- yeast_all_swa_stat |> 
+    mutate(padj = p.adjust(pval, method = 'BH')) |> 
+    filter(corr < 0, padj < 0.05)
+
+sigpos_goa_neg <- enrichGO(sigpos_neg$gene_id, org.Sc.sgd.db, keyType = 'ORF', ont = 'ALL', qvalueCutoff = 0.05)
+sigpos_goa_neg <- simplify(sigpos_goa_neg)
+# only 1 significant categories
+
+enrichplot::dotplot(sigpos_goa_neg, showCategory = 20) + 
+  theme_bw(base_size = 12) +
+  theme(axis.text = element_text(color = 'black'),
+        panel.grid=element_blank())
+ggsave('figures/sliding_trends_negtive_GO.pdf', width = 6, height = 6)
 ```
 
 
@@ -218,3 +261,34 @@ ggplot(yeast_all_swa_stat2, aes(y = glen, x = corr)) +
 yeast_all_swa_stat
 ```
 
+```{r}
+# using genes with at least 150 codons and exclude first 50 codons
+yeast_cds150 <- yeast_cds_qc[width(yeast_cds_qc) >= 450]
+yeast_cds150 <- subseq(yeast_cds150, start = 151, end = width(yeast_cds150))
+
+yeast_cds150_wtai <- lapply(yeast_cds150, function(seq){
+    seq_s <- (length(seq) / 3) %/% 5
+    slide_apply(seq, get_tai, step = seq_s, before = 0, after = seq_s - 1, trna_w = yeast_trna_w)
+})
+
+yeast_cds150_wtai <- bind_rows(yeast_cds150_wtai, .id = 'gene_id')
+yeast_cds150_wtai <- yeast_cds150_wtai |> mutate(bin = row_number(), .by = gene_id)
+
+wtai_dt <- yeast_cds150_wtai |>
+    pivot_wider(id_cols = gene_id, names_from = bin, values_from = index)
+
+wtai_m <- as.matrix(wtai_dt |> select(-gene_id))
+wtai_ms <- t(scale(t(wtai_m)))
+
+pdf('figures/regional_tai_heatmap.pdf', width = 4, height = 5)
+ComplexHeatmap::Heatmap(
+    wtai_ms,
+    cluster_rows = TRUE, cluster_columns = FALSE, 
+    show_row_names = FALSE,
+    show_column_names = FALSE,
+    clustering_method_rows = 'ward.D2',
+    use_raster = TRUE,
+    name = 'Z(tAI)'
+)
+dev.off()
+```
